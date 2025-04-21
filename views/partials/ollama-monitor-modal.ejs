@@ -1,0 +1,77 @@
+<!-- Ollama API Monitor Modal -->
+<div class="modal fade" id="ollamaMonitorModal" tabindex="-1" aria-labelledby="ollamaMonitorModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-dark text-white">
+        <h5 class="modal-title" id="ollamaMonitorModalLabel">
+          <i class="bi bi-cpu me-2"></i>Ollama API Monitor
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <div>
+            <span class="me-2">Ollama API Status:</span>
+            <span class="badge rounded-pill" id="ollama-api-status-badge">
+              <span class="spinner-border spinner-border-sm"></span> Checking...
+            </span>
+          </div>
+          <div class="d-flex align-items-center">
+            <div class="form-check form-switch me-2">
+              <input class="form-check-input" type="checkbox" id="ollama-auto-refresh-toggle" checked>
+              <label class="form-check-label" for="ollama-auto-refresh-toggle">Auto-refresh</label>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-secondary me-2" id="ollama-refresh-events-btn">
+              <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-danger" id="ollama-clear-events-btn">
+              <i class="bi bi-trash"></i> Clear
+            </button>
+          </div>
+        </div>
+
+        <div class="btn-group btn-group-sm mb-3" role="group" aria-label="Filter events">
+          <button type="button" class="btn btn-outline-secondary active ollama-filter-btn" data-filter="all">All Events (<span id="ollama-events-count">0</span>)</button>
+          <button type="button" class="btn btn-outline-secondary ollama-filter-btn" data-filter="request">Requests</button>
+          <button type="button" class="btn btn-outline-secondary ollama-filter-btn" data-filter="response">Responses</button>
+          <button type="button" class="btn btn-outline-secondary ollama-filter-btn" data-filter="error">Errors</button>
+        </div>
+
+        <div class="api-events-container" id="ollama-api-events-container">
+          <div id="ollama-no-events-message">
+            <p class="mt-3 text-muted">No API events recorded yet.</p>
+            <p class="text-muted small">Events will appear here when you interact with the Ollama API.</p>
+          </div>
+          <div id="ollama-events-list" class="d-none">
+            <!-- Events will be inserted here dynamically -->
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="text-muted small me-auto">
+          Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> to open this monitor
+        </div>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Template for event items -->
+<template id="ollama-event-item-template">
+  <div class="event-item mb-3 p-3 rounded">
+    <div class="d-flex justify-content-between align-items-start mb-2">
+      <div>
+        <span class="badge event-type me-2">Type</span>
+        <span class="event-time text-muted small">Time</span>
+      </div>
+      <button class="btn btn-sm btn-link toggle-details" data-target="collapse-id">Show details</button>
+    </div>
+    <div class="event-summary mb-2">Summary will appear here</div>
+    <div class="collapse">
+      <div class="mt-2 p-2 bg-light rounded">
+        <pre class="event-data mb-0 text-wrap"><code>Details will appear here</code></pre>
+      </div>
+    </div>
+  </div>
+</template>

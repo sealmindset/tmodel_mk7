@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<%- include('./partials/header.ejs') %>
+
+<div class="container mt-5">
+  <div class="row">
+    <div class="col-md-8 offset-md-2">
+      <div class="card">
+        <div class="card-header bg-primary text-white">
+          <h2 class="mb-0">API Settings</h2>
+        </div>
+        <div class="card-body">
+          <% if (message) { %>
+            <div class="alert alert-<%= message.type %> alert-dismissible fade show" role="alert">
+              <%= message.text %>
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+          <% } %>
+
+          <form action="/api-settings" method="POST" id="api-settings-form" onsubmit="console.log('Form is being submitted with provider:', document.querySelector('input[name=\'llmProvider\']:checked').value)">
+            <div class="mb-4">
+              <h4>LLM Provider Settings</h4>
+              <div class="mb-3">
+                <label class="form-label">LLM Provider</label>
+                <div class="form-check">
+                  <input class="form-check-input" type="radio" name="llmProvider" id="providerOpenAI" value="openai" <%= llmProvider === 'openai' ? 'checked' : '' %>>
+                  <label class="form-check-label" for="providerOpenAI">
+                    OpenAI API (Internet required)
+                  </label>
+                </div>
+                <div class="form-check">
+                  <input class="form-check-input" type="radio" name="llmProvider" id="providerOllama" value="ollama" <%= llmProvider === 'ollama' ? 'checked' : '' %>>
+                  <label class="form-check-label" for="providerOllama">
+                    Ollama (Local models)
+                  </label>
+                </div>
+                <!-- No hidden input needed; radio buttons alone are sufficient -->
+                <div class="form-text">Choose which LLM provider to use for threat analysis.</div>
+              </div>
+            </div>
+
+            <!-- OpenAI Settings -->
+            <div class="mb-4 provider-settings" id="openaiSettings">
+              <h4>OpenAI API Settings</h4>
+              <div class="mb-3">
+                <label for="openai-api-key" class="form-label">API Key</label>
+                <div class="input-group">
+                  <input 
+                    type="password" 
+                    class="form-control" 
+                    id="openai-api-key" 
+                    name="openaiApiKey"
+                    value="<%= openaiApiKey || '' %>" 
+                    placeholder="sk-..." 
+                  />
+                  <button class="btn btn-outline-secondary" type="button" id="toggle-api-key">
+                    <i class="fas fa-eye"></i>
+                  </button>
+                </div>
+                <div class="form-text">
+                  Your OpenAI API key is loaded from Redis or Postgres if available. If no key is found, enter one and click Save Settings. The key is stored securely and only used for making API requests.
+                </div>
+              </div>
+              <div class="mb-3">
+                <label for="openaiModel" class="form-label">OpenAI Model</label>
+                <select class="form-select" id="openaiModel" name="openaiModel">
+  <option value="" disabled selected>Loading models...</option>
+</select>
+<div id="openai-model-error" class="text-danger" style="display:none;"></div>
+<div class="form-text">Choose the OpenAI model to use for completions. If unsure, use gpt-3.5-turbo.</div>
+<script>
+document.addEventListener('DOMContentLoaded', async function() {
+  const modelSelect = document.getElementById('openaiModel');
+  const errorDiv = document.getElementById('openai-model-error');
+  const currentModel = "<%= openaiModel %>";
+  try {
+    const response = await fetch('/api-settings/openai-models');
+    if (!response.ok) throw new Error('Failed to fetch models');
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'API error');
+    const models = data.models;
+    if (!Array.isArray(models) || models.length === 0) throw new Error('No models found');
+    modelSelect.innerHTML = '';
+    models.forEach(model => {
+      const opt = document.createElement('option');
+      opt.value = model;
+      opt.textContent = model;
+      if (model === currentModel) opt.selected = true;
+      modelSelect.appendChild(opt);
+    });
+    errorDiv.style.display = 'none';
+  } catch (err) {
+    modelSelect.innerHTML = '<option value="">Error loading models</option>';
+    errorDiv.textContent = err.message;
+    errorDiv.style.display = 'block';
+  }
+});
+</script>
+
+              </div>
+              <div class="d-flex align-items-center mb-3">
+                <div class="me-2">Status:</div> 
+                <div class="status-indicator <%= openaiStatus ? 'online' : 'offline' %>" 
+                     data-bs-toggle="tooltip" 
+                     title="OpenAI API: <%= openaiStatus ? 'Connected' : 'Disconnected' %>">
+                </div>
+                <div class="ms-2 text-<%= openaiStatus ? 'success' : 'danger' %>">
+                  <%= openaiStatus ? 'Connected' : 'Disconnected' %>
+                </div>
+              </div>
+              <div class="mb-3">
+                <button type="button" class="btn btn-sm btn-info" id="test-openai-connection">
+                  Test Connection
+                </button>
+                <span id="test-result" class="ms-2"></span>
+              </div>
+            </div>
+
+            <!-- Rapid7 API Settings -->
+            <div class="mb-4 provider-settings">
+              <h4>Rapid7 API Settings</h4>
+              <div class="mb-3">
+                <label for="rapid7-api-url" class="form-label">API URL</label>
+                <input 
+                  type="text" 
+                  class="form-control" 
+                  id="rapid7-api-url" 
+                  name="rapid7ApiUrl" 
+                  value="<%= rapid7ApiUrl || 'http://localhost:3100' %>" 
+                  placeholder="http://localhost:3100"
+                />
+                <div class="form-text">The base URL for your Rapid7 API endpoint.</div>
+              </div>
+              <div class="mb-3">
+                <label for="rapid7-api-key" class="form-label">API Key</label>
+                <div class="input-group">
+                  <input 
+                    type="password" 
+                    class="form-control" 
+                    id="rapid7-api-key" 
+                    name="rapid7ApiKey"
+                    value="<%= rapid7ApiKey %>" 
+                    placeholder="Enter your Rapid7 API key..." 
+                  />
+                  <button class="btn btn-outline-secondary" type="button" id="toggle-rapid7-api-key">
+                    <i class="fas fa-eye"></i>
+                  </button>
+                </div>
+                <div class="form-text">Your Rapid7 API key is stored securely and only used for making API requests.</div>
+              </div>
+              <div class="d-flex align-items-center mb-3">
+                <div class="me-2">Status:</div> 
+                <div class="status-indicator <%= typeof rapid7Status !== 'undefined' && rapid7Status ? 'online' : 'offline' %>" 
+                     data-bs-toggle="tooltip" 
+                     title="<%= typeof rapid7Status !== 'undefined' && rapid7Status ? 'Rapid7 API is accessible' : 'Rapid7 API is not accessible' %>"></div>
+                <div class="ms-2 text-<%= typeof rapid7Status !== 'undefined' && rapid7Status ? 'success' : 'danger' %>">
+                  <%= typeof rapid7Status !== 'undefined' && rapid7Status ? 'Connected' : 'Disconnected' %>
+                </div>
+              </div>
+              <div class="mb-3">
+                <button type="button" class="btn btn-sm btn-info" id="test-rapid7-connection">
+                  Test Connection
+                </button>
+                <span id="test-rapid7-result" class="ms-2"></span>
+              </div>
+            </div>
+            
+            <!-- Ollama Settings -->
+            <div class="mb-4 provider-settings" id="ollamaSettings">
+              <h4>Ollama Settings</h4>
+              <div class="mb-3">
+                <label for="ollama-api-url" class="form-label">API URL</label>
+                <input 
+                  type="text" 
+                  class="form-control" 
+                  id="ollama-api-url" 
+                  name="ollamaApiUrl" 
+                  value="<%= typeof ollamaApiUrl !== 'undefined' ? ollamaApiUrl : 'http://localhost:11434' %>" 
+                  placeholder="http://localhost:11434"
+                />
+                <div class="form-text">The base URL for your Ollama API endpoint (default: http://localhost:11434).</div>
+              </div>
+              <div class="mb-3">
+                <label for="ollama-model" class="form-label">Model</label>
+                <select class="form-select" id="ollama-model" name="ollamaModel">
+                  <% 
+                  // Track if we've marked any option as selected
+                  let foundSelected = false;
+                  
+                  // First pass - try for exact matches
+                  availableOllamaModels.forEach(model => { 
+                    // Check for exact match
+                    const isExactMatch = String(ollamaModel).trim() === String(model.name).trim();
+                    if (isExactMatch) foundSelected = true;
+                  %>
+                    <option value="<%= model.name %>" <%= isExactMatch ? 'selected' : '' %>><%= model.name %></option>
+                  <% }); %>
+                  
+                  <% 
+                  // Second pass - if no exact match was found, look for partial matches
+                  if (!foundSelected) {
+                    // We need to re-render the dropdown options
+                    availableOllamaModels.forEach(model => {
+                      // Check for partial match (base name starts with saved name or vice versa)
+                      const isPartialMatch = !foundSelected && (
+                        model.name.startsWith(ollamaModel) || 
+                        ollamaModel.startsWith(model.name)
+                      );
+                      
+                      // Mark the first partial match as selected
+                      if (isPartialMatch) foundSelected = true;
+                  %>
+                    <option value="<%= model.name %>" <%= isPartialMatch ? 'selected' : '' %>><%= model.name %></option>
+                  <% });
+                  } %>
+                </select>
+                <div class="form-text">Select which local Ollama model to use.</div>
+              </div>
+              <div class="d-flex align-items-center mb-3">
+                <div class="me-2">Status:</div> 
+                <div class="status-indicator <%= ollamaStatus ? 'online' : 'offline' %>" 
+                     data-bs-toggle="tooltip" 
+                     title="Ollama API: <%= ollamaStatus ? 'Connected' : 'Disconnected' %>">
+                </div>
+                <div class="ms-2 text-<%= ollamaStatus ? 'success' : 'danger' %>">
+                  <%= ollamaStatus ? 'Connected' : 'Disconnected' %>
+                </div>
+              </div>
+              <div class="mb-3">
+                <button type="button" class="btn btn-sm btn-info" id="test-ollama-connection">
+                  Test Connection
+                </button>
+                <span id="test-ollama-result" class="ms-2"></span>
+              </div>
+            </div>
+
+            <!-- Database Settings Section -->
+            <div class="mb-4">
+              <h4>Database Settings</h4>
+              <p class="lead">PostgreSQL database connection information is read from environment variables.</p>
+              <div class="d-flex gap-3 mb-3">
+                <div><strong>Host:</strong> <%= process.env.POSTGRES_HOST || 'localhost' %></div>
+                <div><strong>Port:</strong> <%= process.env.POSTGRES_PORT || '5432' %></div>
+                <div><strong>Database:</strong> <%= process.env.POSTGRES_DB || 'postgres' %></div>
+              </div>
+              <div class="d-flex align-items-center mb-3">
+                <div class="me-2">Status:</div> 
+                <div class="status-indicator" id="postgres-settings-status"
+                     data-bs-toggle="tooltip" 
+                     title="PostgreSQL: Checking connection...">
+                </div>
+                <div class="ms-2" id="postgres-status-text">Checking...</div>
+              </div>
+              <div class="mb-3">
+                <button type="button" class="btn btn-sm btn-info" id="test-postgres-connection">
+                  Test Connection
+                </button>
+                <span id="test-postgres-result" class="ms-2"></span>
+              </div>
+            </div>
+
+            <div class="mb-4">
+              <h4>Redis Connection</h4>
+              <div class="mb-3">
+                <div class="d-flex align-items-center">
+                  <div class="me-2">Status:</div> 
+                  <div class="status-indicator <%= redisStatus ? 'online' : 'offline' %>" 
+                       data-bs-toggle="tooltip" 
+                       title="Redis: <%= redisStatus ? 'Connected' : 'Disconnected' %>">
+                  </div>
+                  <div class="ms-2 text-<%= redisStatus ? 'success' : 'danger' %>">
+                    <%= redisStatus ? 'Connected' : 'Disconnected' %>
+                  </div>
+                </div>
+              </div>
+              <div class="form-text">Redis connection is configured via environment variables.</div>
+            </div>
+
+            <div class="d-grid gap-2">
+              <button type="submit" class="btn btn-primary">Save Settings</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    // Initialize tooltips
+    const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.map(function (tooltipTriggerEl) {
+      return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+
+    // Toggle API key visibility
+    const toggleButton = document.getElementById('toggle-api-key');
+    const apiKeyInput = document.getElementById('openai-api-key');
+    
+    if (toggleButton && apiKeyInput) {
+      toggleButton.addEventListener('click', () => {
+        const type = apiKeyInput.getAttribute('type') === 'password' ? 'text' : 'password';
+        apiKeyInput.setAttribute('type', type);
+        toggleButton.innerHTML = type === 'password' ? '<i class="fas fa-eye"></i>' : '<i class="fas fa-eye-slash"></i>';
+      });
+    }
+
+    // Handle provider selection
+    const providerOpenAI = document.getElementById('providerOpenAI');
+    const providerOllama = document.getElementById('providerOllama');
+    const openaiSettings = document.getElementById('openaiSettings');
+    const ollamaSettings = document.getElementById('ollamaSettings');
+
+    if (providerOpenAI && providerOllama && openaiSettings && ollamaSettings) {
+      // Always show both settings sections regardless of which provider is selected
+      // This ensures settings aren't lost when switching providers
+      openaiSettings.style.display = 'block';
+      ollamaSettings.style.display = 'block';
+      
+      providerOpenAI.addEventListener('change', () => {
+        // Don't hide OpenAI settings when Ollama is selected
+        // openaiSettings.style.display = 'block';
+        // ollamaSettings.style.display = 'none';
+        
+        // Update session storage with current provider
+        sessionStorage.setItem('currentLlmProvider', 'openai');
+        // Dispatch custom event for provider change
+        window.dispatchEvent(new CustomEvent('providerChanged', { detail: { provider: 'openai' } }));
+        
+        // Add visual indication of which provider is active
+        document.querySelector('#openaiSettings h4').classList.add('text-primary');
+        document.querySelector('#ollamaSettings h4').classList.remove('text-primary');
+      });
+
+      providerOllama.addEventListener('change', () => {
+        // Don't hide OpenAI settings when Ollama is selected
+        // openaiSettings.style.display = 'none';
+        // ollamaSettings.style.display = 'block';
+        
+        // Update session storage with current provider
+        sessionStorage.setItem('currentLlmProvider', 'ollama');
+        // Dispatch custom event for provider change
+        window.dispatchEvent(new CustomEvent('providerChanged', { detail: { provider: 'ollama' } }));
+        
+        // Add visual indication of which provider is active
+        document.querySelector('#openaiSettings h4').classList.remove('text-primary');
+        document.querySelector('#ollamaSettings h4').classList.add('text-primary');
+      });
+      
+      // Set initial visual indication based on current provider
+      if (providerOpenAI.checked) {
+        document.querySelector('#openaiSettings h4').classList.add('text-primary');
+      } else if (providerOllama.checked) {
+        document.querySelector('#ollamaSettings h4').classList.add('text-primary');
+      }
+    }
+
+    // Toggle Rapid7 API key visibility
+    const rapid7ApiKeyInput = document.getElementById('rapid7-api-key');
+    const toggleRapid7ApiKeyBtn = document.getElementById('toggle-rapid7-api-key');
+    if (rapid7ApiKeyInput && toggleRapid7ApiKeyBtn) {
+      toggleRapid7ApiKeyBtn.addEventListener('click', function () {
+        const type = rapid7ApiKeyInput.getAttribute('type') === 'password' ? 'text' : 'password';
+        rapid7ApiKeyInput.setAttribute('type', type);
+        this.querySelector('i').classList.toggle('fa-eye-slash');
+      });
+    }
+
+    // Test OpenAI connection
+    const testOpenAIButton = document.getElementById('test-openai-connection');
+    const testOpenAIResult = document.getElementById('test-result');
+    
+    if (testOpenAIButton && testOpenAIResult) {
+      testOpenAIButton.addEventListener('click', async () => {
+        testOpenAIResult.textContent = 'Testing...';
+        testOpenAIResult.className = 'ms-2 text-info';
+        
+        try {
+          const response = await fetch('/api/status?provider=openai');
+          if (response.ok) {
+            const data = await response.json();
+            
+            if (data.openai) {
+              testOpenAIResult.textContent = 'Connection successful!';
+              testOpenAIResult.className = 'ms-2 text-success';
+            } else {
+              testOpenAIResult.textContent = 'Connection failed. Check your API key.';
+              testOpenAIResult.className = 'ms-2 text-danger';
+            }
+          } else {
+            testOpenAIResult.textContent = 'Error checking status. Please try again.';
+            testOpenAIResult.className = 'ms-2 text-warning';
+          }
+        } catch (error) {
+          testOpenAIResult.textContent = 'Network error. Please check your connection.';
+          testOpenAIResult.className = 'ms-2 text-danger';
+          console.error('Error testing OpenAI connection:', error);
+        }
+      });
+    }
+    
+    // Test Rapid7 connection
+    const testRapid7Button = document.getElementById('test-rapid7-connection');
+    const testRapid7Result = document.getElementById('test-rapid7-result');
+    
+    if (testRapid7Button && testRapid7Result) {
+      testRapid7Button.addEventListener('click', async () => {
+        testRapid7Result.textContent = 'Testing...';
+        testRapid7Result.className = 'ms-2 text-info';
+        
+        try {
+          const response = await fetch('/api/status?provider=rapid7');
+          if (response.ok) {
+            const data = await response.json();
+            
+            if (data.rapid7) {
+              testRapid7Result.textContent = 'Connection successful!';
+              testRapid7Result.className = 'ms-2 text-success';
+              
+              // Also update the status indicator to show connected
+              const indicator = document.querySelector('.status-indicator[title*="Rapid7"]');
+              if (indicator) {
+                indicator.classList.remove('offline');
+                indicator.classList.add('online');
+                indicator.setAttribute('title', 'Rapid7 API is accessible');
+              }
+              
+              // Update the status text
+              const statusText = indicator?.nextElementSibling;
+              if (statusText) {
+                statusText.textContent = 'Connected';
+                statusText.className = 'ms-2 text-success';
+              }
+            } else {
+              testRapid7Result.textContent = 'Connection failed. Check your API URL and key.';
+              testRapid7Result.className = 'ms-2 text-danger';
+            }
+          } else {
+            testRapid7Result.textContent = 'Error checking status. Please try again.';
+            testRapid7Result.className = 'ms-2 text-warning';
+          }
+        } catch (error) {
+          testRapid7Result.textContent = 'Network error. Please check your connection.';
+          testRapid7Result.className = 'ms-2 text-danger';
+          console.error('Error testing Rapid7 connection:', error);
+        }
+      });
+    }
+
+    // Test PostgreSQL connection
+    const testPostgresButton = document.getElementById('test-postgres-connection');
+    const testPostgresResult = document.getElementById('test-postgres-result');
+    const postgresStatusIndicator = document.getElementById('postgres-settings-status');
+    const postgresStatusText = document.getElementById('postgres-status-text');
+    
+    if (testPostgresButton && testPostgresResult) {
+      // Check status on page load
+      (async function() {
+        try {
+          const response = await fetch('/health');
+          if (response.ok) {
+            const data = await response.json();
+            
+            // Update the status indicator
+            postgresStatusIndicator.classList.remove('loading', 'online', 'offline');
+            postgresStatusIndicator.classList.add(data.db === 'UP' ? 'online' : 'offline');
+            postgresStatusIndicator.setAttribute('title', `PostgreSQL: ${data.db === 'UP' ? 'Connected' : 'Disconnected'}`);
+            
+            // Update the status text
+      
+      fetch('/health')
+        .then(response => {
+          if (response.ok) {
+            return response.json();
+          }
+          throw new Error('Failed to check PostgreSQL status');
+        })
+        .then(data => {
+          if (data && data.db === 'UP') {
+            // Update the status indicator
+            if (postgresStatusIndicator) {
+              postgresStatusIndicator.classList.remove('offline');
+              postgresStatusIndicator.classList.add('online');
+              postgresStatusIndicator.setAttribute('title', 'PostgreSQL: Connected');
+            }
+            
+            // Update the status text
+            if (postgresStatusText) {
+              postgresStatusText.textContent = 'Connected';
+              postgresStatusText.className = 'ms-2 text-success';
+            }
+          } else {
+            // Update the status indicator
+            if (postgresStatusIndicator) {
+              postgresStatusIndicator.classList.remove('online');
+              postgresStatusIndicator.classList.add('offline');
+              postgresStatusIndicator.setAttribute('title', 'PostgreSQL: Disconnected');
+            }
+            
+            // Update the status text
+            if (postgresStatusText) {
+              postgresStatusText.textContent = 'Disconnected';
+              postgresStatusText.className = 'ms-2 text-danger';
+            }
+          }
+        })
+        .catch(error => {
+          console.error('Error checking PostgreSQL status:', error);
+          // Update the status indicator
+          if (postgresStatusIndicator) {
+            postgresStatusIndicator.classList.remove('online');
+            postgresStatusIndicator.classList.add('offline');
+            postgresStatusIndicator.setAttribute('title', 'PostgreSQL: Disconnected');
+          }
+          
+          // Update the status text
+          if (postgresStatusText) {
+            postgresStatusText.textContent = 'Disconnected';
+            postgresStatusText.className = 'ms-2 text-danger';
+          }
+        });
+    }
+    
+    // Check status on page load
+    updatePostgresStatus();
+    
+    // Set up periodic status check (every 30 seconds)
+    setInterval(updatePostgresStatus, 30000);
+    
+    if (testPostgresButton && testPostgresResult) {
+      testPostgresButton.addEventListener('click', async () => {
+        testPostgresResult.textContent = 'Testing...';
+        testPostgresResult.className = 'ms-2 text-info';
+        
+        try {
+          const response = await fetch('/health');
+          
+          if (response.ok) {
+            const data = await response.json();
+            
+            if (data && data.db === 'UP') {
+              testPostgresResult.textContent = 'Connection successful!';
+              testPostgresResult.className = 'ms-2 text-success';
+              
+              // Update the status indicator
+              postgresStatusIndicator.classList.remove('offline');
+              postgresStatusIndicator.classList.add('online');
+              postgresStatusIndicator.setAttribute('title', 'PostgreSQL: Connected');
+              
+              // Update the status text
+              postgresStatusText.textContent = 'Connected';
+              postgresStatusText.className = 'ms-2 text-success';
+            } else {
+              testPostgresResult.textContent = 'Connection failed. Check your database settings.';
+              testPostgresResult.className = 'ms-2 text-danger';
+              
+              // Update the status indicator
+              postgresStatusIndicator.classList.remove('online');
+              postgresStatusIndicator.classList.add('offline');
+              postgresStatusIndicator.setAttribute('title', 'PostgreSQL: Disconnected');
+              
+              // Update the status text
+              postgresStatusText.textContent = 'Disconnected';
+              postgresStatusText.className = 'ms-2 text-danger';
+            }
+          } else {
+            testPostgresResult.textContent = 'Error checking status. Please try again.';
+            testPostgresResult.className = 'ms-2 text-warning';
+            
+            // Update the status indicator
+            postgresStatusIndicator.classList.remove('online');
+            postgresStatusIndicator.classList.add('offline');
+            postgresStatusIndicator.setAttribute('title', 'PostgreSQL: Disconnected');
+            
+            // Update the status text
+            postgresStatusText.textContent = 'Disconnected';
+            postgresStatusText.className = 'ms-2 text-danger';
+          }
+        } catch (error) {
+          testPostgresResult.textContent = 'Network error. Please check your connection.';
+          testPostgresResult.className = 'ms-2 text-danger';
+          console.error('Error testing PostgreSQL connection:', error);
+          
+          // Update the status indicator
+          postgresStatusIndicator.classList.remove('online');
+          postgresStatusIndicator.classList.add('offline');
+          postgresStatusIndicator.setAttribute('title', 'PostgreSQL: Disconnected');
+          
+          // Update the status text
+          postgresStatusText.textContent = 'Disconnected';
+          postgresStatusText.className = 'ms-2 text-danger';
+        }
+      });
+    }
+    
+    // Test Ollama connection
+    const testOllamaButton = document.getElementById('test-ollama-connection');
+    const testOllamaResult = document.getElementById('test-ollama-result');
+    
+    if (testOllamaButton && testOllamaResult) {
+      testOllamaButton.addEventListener('click', async () => {
+        testOllamaResult.textContent = 'Testing...';
+        testOllamaResult.className = 'ms-2 text-info';
+        
+        try {
+          const response = await fetch('/api/status?provider=ollama');
+          if (response.ok) {
+            const data = await response.json();
+            
+            if (data.ollama) {
+              testOllamaResult.textContent = 'Connection successful!';
+              testOllamaResult.className = 'ms-2 text-success';
+            } else {
+              testOllamaResult.textContent = 'Connection failed. Check that Ollama is running.';
+              testOllamaResult.className = 'ms-2 text-danger';
+            }
+          } else {
+            testOllamaResult.textContent = 'Error checking status. Please try again.';
+            testOllamaResult.className = 'ms-2 text-warning';
+          }
+        } catch (error) {
+          testOllamaResult.textContent = 'Network error. Is Ollama running?';
+          testOllamaResult.className = 'ms-2 text-danger';
+          console.error('Error testing Ollama connection:', error);
+        }
+      });
+    }
+    // Update provider selection when form is submitted
+    const settingsForm = document.getElementById('api-settings-form');
+    const providerRadios = document.querySelectorAll('input[name="llmProvider"]');
+    if (providerRadios) {
+      providerRadios.forEach(radio => {
+        radio.addEventListener('change', function() {
+          // Add visual indication of which provider is active
+          if (this.value === 'openai') {
+            document.querySelector('#openaiSettings h4').classList.add('text-primary');
+            document.querySelector('#ollamaSettings h4').classList.remove('text-primary');
+          } else if (this.value === 'ollama') {
+            document.querySelector('#openaiSettings h4').classList.remove('text-primary');
+            document.querySelector('#ollamaSettings h4').classList.add('text-primary');
+          }
+        });
+      });
+    }
+    if (settingsForm) {
+      settingsForm.addEventListener('submit', () => {
+        const selectedProvider = document.querySelector('input[name="llmProvider"]:checked').value;
+        sessionStorage.setItem('currentLlmProvider', selectedProvider);
+      });
+    }
+    if (!sessionStorage.getItem('currentLlmProvider')) {
+      sessionStorage.setItem('currentLlmProvider', '<%= llmProvider %>');
+    }
+  });
+</script>
+
+<%- include('./partials/footer.ejs') %>
+</html>
