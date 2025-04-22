@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rapid7 API Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    input {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    button {
+      background-color: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #0069d9;
+    }
+    .result {
+      margin-top: 20px;
+      padding: 10px;
+      border-radius: 4px;
+    }
+    .success {
+      background-color: #d4edda;
+      color: #155724;
+    }
+    .error {
+      background-color: #f8d7da;
+      color: #721c24;
+    }
+    .info {
+      background-color: #d1ecf1;
+      color: #0c5460;
+    }
+    .log {
+      background-color: #f8f9fa;
+      border: 1px solid #ddd;
+      padding: 10px;
+      margin-top: 20px;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>Rapid7 API Connection Test</h1>
+  
+  <div class="card">
+    <h2>Test Direct API Connection</h2>
+    <div class="form-group">
+      <label for="api-url">API URL</label>
+      <input type="text" id="api-url" value="https://us.api.insight.rapid7.com" placeholder="https://us.api.insight.rapid7.com">
+    </div>
+    <div class="form-group">
+      <label for="api-key">API Key</label>
+      <input type="password" id="api-key" value="c8428ef0-6786-4a6e-aaa8-ac4841d87894" placeholder="Enter your Rapid7 API key">
+    </div>
+    <button id="test-direct">Test Direct Connection</button>
+    <div id="direct-result" class="result"></div>
+  </div>
+  
+  <div class="card">
+    <h2>Test API Endpoint</h2>
+    <p>This tests the server-side endpoint that the UI uses</p>
+    <button id="test-endpoint">Test API Endpoint</button>
+    <div id="endpoint-result" class="result"></div>
+  </div>
+  
+  <div class="card">
+    <h2>Test POST Endpoint</h2>
+    <p>This tests the POST endpoint used by the "Test Connection" button</p>
+    <button id="test-post">Test POST Endpoint</button>
+    <div id="post-result" class="result"></div>
+  </div>
+  
+  <div class="log" id="log"></div>
+  
+  <script>
+    // Helper function to log messages
+    function log(message) {
+      const logElement = document.getElementById('log');
+      const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+      logElement.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+      logElement.scrollTop = logElement.scrollHeight;
+    }
+    
+    // Helper function to update result
+    function updateResult(elementId, message, type) {
+      const element = document.getElementById(elementId);
+      element.textContent = message;
+      element.className = `result ${type}`;
+    }
+    
+    // Test direct API connection
+    document.getElementById('test-direct').addEventListener('click', async () => {
+      const apiUrl = document.getElementById('api-url').value.trim();
+      const apiKey = document.getElementById('api-key').value.trim();
+      
+      if (!apiUrl || !apiKey) {
+        updateResult('direct-result', 'Please enter both API URL and API Key', 'error');
+        return;
+      }
+      
+      updateResult('direct-result', 'Testing...', 'info');
+      log(`Testing direct connection to ${apiUrl}`);
+      
+      try {
+        // Use the fetch API with CORS proxy to test the connection
+        const response = await fetch('/api/rapid7-test/connection', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ apiUrl, apiKey })
+        });
+        
+        log(`Response status: ${response.status}`);
+        const data = await response.json();
+        log(`Response data: ${JSON.stringify(data)}`);
+        
+        if (response.ok && data.success) {
+          updateResult('direct-result', 'Connection successful!', 'success');
+        } else {
+          updateResult('direct-result', `Connection failed: ${data.message || 'Unknown error'}`, 'error');
+        }
+      } catch (error) {
+        log(`Error: ${error.message}`);
+        updateResult('direct-result', `Error: ${error.message}`, 'error');
+      }
+    });
+    
+    // Test API endpoint
+    document.getElementById('test-endpoint').addEventListener('click', async () => {
+      updateResult('endpoint-result', 'Testing...', 'info');
+      log('Testing API endpoint');
+      
+      try {
+        const response = await fetch('/api/rapid7-test/connection');
+        log(`Response status: ${response.status}`);
+        const data = await response.json();
+        log(`Response data: ${JSON.stringify(data)}`);
+        
+        if (response.ok && data.success) {
+          updateResult('endpoint-result', 'Connection successful!', 'success');
+        } else {
+          updateResult('endpoint-result', `Connection failed: ${data.message || 'Unknown error'}`, 'error');
+        }
+      } catch (error) {
+        log(`Error: ${error.message}`);
+        updateResult('endpoint-result', `Error: ${error.message}`, 'error');
+      }
+    });
+    
+    // Test POST endpoint
+    document.getElementById('test-post').addEventListener('click', async () => {
+      const apiUrl = document.getElementById('api-url').value.trim();
+      const apiKey = document.getElementById('api-key').value.trim();
+      
+      if (!apiUrl || !apiKey) {
+        updateResult('post-result', 'Please enter both API URL and API Key', 'error');
+        return;
+      }
+      
+      updateResult('post-result', 'Testing...', 'info');
+      log(`Testing POST endpoint with API URL: ${apiUrl}`);
+      
+      try {
+        const response = await fetch('/api/rapid7-test/connection', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ apiUrl, apiKey })
+        });
+        
+        log(`Response status: ${response.status}`);
+        const data = await response.json();
+        log(`Response data: ${JSON.stringify(data)}`);
+        
+        if (response.ok && data.success) {
+          updateResult('post-result', 'Connection successful!', 'success');
+        } else {
+          updateResult('post-result', `Connection failed: ${data.message || 'Unknown error'}`, 'error');
+        }
+      } catch (error) {
+        log(`Error: ${error.message}`);
+        updateResult('post-result', `Error: ${error.message}`, 'error');
+      }
+    });
+    
+    // Log initial values
+    log('Page loaded');
+    log(`Initial API URL: ${document.getElementById('api-url').value}`);
+    log(`Initial API Key: ${document.getElementById('api-key').value.substring(0, 4)}...${document.getElementById('api-key').value.substring(document.getElementById('api-key').value.length - 4)}`);
+  </script>
+</body>
+</html>

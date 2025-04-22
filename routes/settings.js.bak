@@ -231,8 +231,7 @@ router.get('/', ensureAuthenticated, async (req, res) => {
     }
     
     // Rapid7 settings from Redis
-    let rapid7ApiUrl = await redisClient.get('settings:rapid7:api_url') || 'https://us.api.insight.rapid7.com';
-    let rapid7ApiValidationUrl = await redisClient.get('settings:rapid7:validation_url') || 'https://us.api.insight.rapid7.com/validate';
+    let rapid7ApiUrl = await redisClient.get('settings:rapid7:api_url') || 'http://localhost:3100';
     let rapid7ApiKey = await redisClient.get('settings:rapid7:api_key') || '';
     
     // Ollama API URL from Redis
@@ -266,7 +265,6 @@ router.get('/', ensureAuthenticated, async (req, res) => {
       llmProvider,
       availableOllamaModels,
       rapid7ApiUrl,
-      rapid7ApiValidationUrl,
       rapid7ApiKey,
       rapid7Status: false, // Default to false until we implement a proper check
       postgresqlHost,
@@ -379,7 +377,6 @@ router.post('/', ensureAuthenticated, async (req, res) => {
       ollamaModel,
       rapid7ApiUrl,
       rapid7ApiKey,
-    rapid7ApiValidationUrl,
       settingsType,
       postgresqlHost,
       postgresqlPort,
@@ -527,7 +524,6 @@ router.post('/', ensureAuthenticated, async (req, res) => {
           try {
             // Use redisUtil.storeRedisValue instead of direct client access
             await redisUtil.storeRedisValue('settings:rapid7:api_key', apiKeyString);
-            await redisUtil.storeRedisValue('settings:rapid7:validation_url', rapid7ApiValidationUrl || 'https://us.api.insight.rapid7.com/validate');
             logger.info('Successfully saved Rapid7 API key to Redis');
             savedSettings.push('Rapid7 API Key');
             req.flash('success', 'Rapid7 API key saved successfully.');

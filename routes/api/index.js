@@ -15,6 +15,8 @@ const threatModelsRoutes = require('./threatModels');
 const threatModelMergeRoutes = require('./threatModelMerge');
 const redisMergeRoutes = require('./redisMerge');
 const rapid7Routes = require('./rapid7');
+const rapid7TestRoutes = require('./rapid7-test');
+const rapid7SyncRoutes = require('./rapid7-sync');
 const llmRoutes = require('./llm');
 const projectAssignmentsRoutes = require('./projectAssignments');
 const openaiKeyController = require('./openaiKeyController');
@@ -30,6 +32,8 @@ router.use('/threat-models', threatModelsRoutes);
 router.use('/', threatModelMergeRoutes); // Mounted at root level for cross-resource operations
 router.use('/', redisMergeRoutes); // Redis-specific merge endpoint
 router.use('/rapid7', rapid7Routes);
+router.use('/rapid7-test', rapid7TestRoutes); // Routes for testing Rapid7 API connection
+router.use('/rapid7-sync', rapid7SyncRoutes); // Routes for syncing Rapid7 vulnerability data
 router.use('/llm', llmRoutes);
 router.use('/settings', openaiKeyController);
 router.use('/subjects', subjectsRoutes);

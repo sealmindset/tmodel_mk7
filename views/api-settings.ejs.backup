@@ -139,7 +139,7 @@
             </div>
             
             <div class="d-flex">
-              <button type="submit" class="btn btn-primary me-2" id="save-openai-settings">Save Settings</button>
+              <button type="button" class="btn btn-primary me-2" id="save-openai-settings">Save Settings</button>
               <button type="button" class="btn btn-info" id="test-openai-connection">Test Connection</button>
               <span id="test-openai-result" class="ms-2"></span>
             </div>
@@ -165,8 +165,7 @@
             </span>
           </div>
           
-          <form id="ollama-settings-form" action="/api-settings" method="POST">
-            <input type="hidden" name="settingsType" value="ollama">
+          <form id="ollama-settings-form">
             <div class="mb-3">
               <label for="ollama-api-url" class="form-label">API URL</label>
               <input type="text" class="form-control" id="ollama-api-url" name="ollamaApiUrl" value="<%= ollamaApiUrl || 'http://localhost:11434' %>" placeholder="http://localhost:11434">
@@ -185,7 +184,7 @@
             </div>
             
             <div class="d-flex">
-              <button type="submit" class="btn btn-primary me-2" id="save-ollama-settings">Save Settings</button>
+              <button type="button" class="btn btn-primary me-2" id="save-ollama-settings">Save Settings</button>
               <button type="button" class="btn btn-info" id="test-ollama-connection">Test Connection</button>
               <span id="test-ollama-result" class="ms-2"></span>
             </div>
@@ -211,18 +210,12 @@
             </span>
           </div>
           
-          <form id="rapid7-settings-form" action="/api-settings" method="POST">
+          <form id="rapid7-settings-form" action="/settings" method="POST">
             <input type="hidden" name="settingsType" value="rapid7">
             <div class="mb-3">
               <label for="rapid7-api-url" class="form-label">API URL</label>
               <input type="text" class="form-control" id="rapid7-api-url" name="rapid7ApiUrl" value="<%= rapid7ApiUrl || 'https://us.api.insight.rapid7.com' %>" placeholder="https://us.api.insight.rapid7.com">
               <div class="form-text">The base URL for your Rapid7 API endpoint.</div>
-            </div>
-            
-            <div class="mb-3">
-              <label for="rapid7-api-validation-url" class="form-label">API Validation URL</label>
-              <input type="text" class="form-control" id="rapid7-api-validation-url" name="rapid7ApiValidationUrl" value="<%= rapid7ApiValidationUrl || 'https://us.api.insight.rapid7.com/validate' %>" placeholder="https://us.api.insight.rapid7.com/validate">
-              <div class="form-text">The URL for validating your Rapid7 API connection.</div>
             </div>
             
             <div class="mb-3">
@@ -245,12 +238,6 @@
               </div>
               <div class="form-text">Upload Rapid7 API OpenAPI specification file to automatically configure endpoints.</div>
               <div id="rapid7-spec-status" class="mt-2"></div>
-            
-            <div class="d-flex">
-              <button type="submit" class="btn btn-primary me-2" id="save-rapid7-settings">Save Settings</button>
-              <button type="button" class="btn btn-info" id="test-rapid7-connection">Test Connection</button>
-              <span id="test-rapid7-result" class="ms-2"></span>
-            </div>
             </div>
             
             <!-- Discovered Endpoints -->
@@ -312,8 +299,7 @@
             </span>
           </div>
           
-          <form id="ollama-settings-form" action="/api-settings" method="POST">
-            <input type="hidden" name="settingsType" value="ollama">
+          <form id="ollama-settings-form">
             <div class="mb-3">
               <label for="ollama-api-url" class="form-label">API URL</label>
               <input type="text" class="form-control" id="ollama-api-url" name="ollamaApiUrl" value="<%= typeof ollamaApiUrl !== 'undefined' ? ollamaApiUrl : 'http://localhost:11434' %>" placeholder="http://localhost:11434">
@@ -358,7 +344,7 @@
             </span>
           </div>
           
-          <form id="rapid7-settings-form" action="/api-settings" method="POST">
+          <form id="rapid7-settings-form" action="/settings" method="POST">
             <input type="hidden" name="settingsType" value="rapid7">
             <div class="mb-3">
               <label for="rapid7-api-url" class="form-label">API URL</label>

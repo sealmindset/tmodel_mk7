@@ -6,7 +6,13 @@
  */
 const axios = require('axios');
 const db = require('../db/db');
-const redis = require('../utils/redis').client;
+const redisUtil = require('../utils/redis');
+const logger = require('../utils/logger').forModule('rapid7Service');
+
+// Connect to Redis at startup
+redisUtil.connect().catch(err => {
+  logger.error('Failed to connect to Redis at startup', null, err);
+});
 
 // Helper functions for storing scan data and vulnerabilities
 async function saveVulnerability(vulnData) {
@@ -81,416 +87,174 @@ class Rapid7Service {
   constructor() {
     this.refreshClient();
   }
+  
+  /**
+   * Initialize the service with the provided settings
+   * @param {Object} settings - Settings object
+   * @param {string} settings.apiUrl - API URL
+   * @param {string} settings.apiKey - API key
+   */
+  init(settings = {}) {
+    if (settings.apiUrl) {
+      this.apiUrl = settings.apiUrl;
+      this.baseUrl = settings.apiUrl;
+      
+      // Remove trailing slash from baseUrl if present
+      if (this.baseUrl.endsWith('/')) {
+        this.baseUrl = this.baseUrl.slice(0, -1);
+      }
+      
+      console.log('Initialized Rapid7 service with API URL:', this.apiUrl);
+    }
+    
+    if (settings.apiKey) {
+      this.apiKey = settings.apiKey;
+      console.log('Initialized Rapid7 service with API key, length:', this.apiKey.length);
+    }
+    
+    // Configure axios client with updated settings
+    this.client = axios.create({
+      baseURL: this.baseUrl,
+      headers: {
+        'X-Api-Key': this.apiKey,
+        'Content-Type': 'application/json'
+      }
+    });
+  }
 
   /**
    * Refresh the API client with latest settings from Redis
    */
   async refreshClient() {
     try {
-      // Get API URL and Key from Redis (fallback to env vars)
-      const [apiUrl, apiKey] = await Promise.all([
-        redis.get('settings:rapid7:api_url'),
-        redis.get('settings:rapid7:api_key')
-      ]);
+      // Get API URL and key from Redis using the utility functions
+      const apiUrl = await redisUtil.getRedisValue('settings:rapid7:api_url');
+      const apiKey = await redisUtil.getRedisValue('settings:rapid7:api_key');
       
-      this.baseUrl = apiUrl || process.env.RAPID7_API_URL || 'http://localhost:3100';
-      this.apiKey = apiKey || process.env.RAPID7_API_KEY || 'test-api-key';
+      logger.debug('Retrieved Rapid7 settings from Redis', {
+        apiUrlSet: !!apiUrl,
+        apiKeyLength: apiKey ? apiKey.length : 0
+      });
       
+      // Set baseUrl and apiKey with fallbacks to environment variables
+      this.baseUrl = apiUrl || process.env.RAPID7_API_URL || 'https://us.api.insight.rapid7.com';
+      this.apiUrl = this.baseUrl;
+      this.apiKey = apiKey || process.env.RAPID7_API_KEY || '';
+      
+      // Configure axios client
       this.client = axios.create({
         baseURL: this.baseUrl,
         headers: {
-          'Content-Type': 'application/json',
-          'X-Api-Key': this.apiKey
+          'X-Api-Key': this.apiKey,
+          'Content-Type': 'application/json'
         },
-        timeout: 15000 // 15 second timeout
+        timeout: 30000 // 30 seconds timeout
       });
       
-      console.log(`Rapid7 client configured with API URL: ${this.baseUrl}`);
+      logger.info('Rapid7 client refreshed', { baseUrl: this.baseUrl });
+      return true;
     } catch (error) {
-      console.error('Error refreshing Rapid7 client:', error);
-      // Create default client anyway
-      this.baseUrl = process.env.RAPID7_API_URL || 'http://localhost:3100';
-      this.apiKey = process.env.RAPID7_API_KEY || 'test-api-key';
-      this.client = axios.create({
-        baseURL: this.baseUrl,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Api-Key': this.apiKey
-        }
-      });
+      logger.error('Error refreshing Rapid7 client', null, error);
+      return false;
     }
   }
-  
+
   /**
-   * Get all vulnerabilities from Rapid7
-   * 
-   * @param {Object} options - Query options
-   * @returns {Promise<Array>} - Array of vulnerabilities
-   */
-  async getVulnerabilities(options = {}) {
-    try {
-      const { page = 0, size = 100, sort = 'severity,desc' } = options;
-      const response = await this.client.get('/vulnerabilities', {
-        params: {
-          page,
-          size,
-          sort
-        }
-      });
-      
-      return response.data.resources;
-    } catch (error) {
-      console.error('Error fetching vulnerabilities from Rapid7:', error.message);
-      throw new Error(`Failed to fetch vulnerabilities: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get vulnerability details by ID
-   * 
-   * @param {string} vulnerabilityId - Vulnerability ID
-   * @returns {Promise<Object>} - Vulnerability details
-   */
-  async getVulnerabilityById(vulnerabilityId) {
-    try {
-      const response = await this.client.get(`/vulnerabilities/${vulnerabilityId}`);
-      return response.data;
-    } catch (error) {
-      console.error(`Error fetching vulnerability ${vulnerabilityId} from Rapid7:`, error.message);
-      throw new Error(`Failed to fetch vulnerability details: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get vulnerabilities for a specific asset
-   * 
-   * @param {string} assetId - Asset ID in Rapid7
-   * @returns {Promise<Array>} - Array of vulnerabilities
-   */
-  async getVulnerabilitiesForAsset(assetId) {
-    try {
-      const response = await this.client.get(`/assets/${assetId}/vulnerabilities`);
-      return response.data.resources;
-    } catch (error) {
-      console.error(`Error fetching vulnerabilities for asset ${assetId}:`, error.message);
-      throw new Error(`Failed to fetch asset vulnerabilities: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get solutions for a vulnerability
-   * 
-   * @param {string} vulnerabilityId - Vulnerability ID
-   * @returns {Promise<Array>} - Array of solutions
-   */
-  async getSolutions(vulnerabilityId) {
-    try {
-      const response = await this.client.get(`/vulnerabilities/${vulnerabilityId}/solutions`);
-      return response.data.resources;
-    } catch (error) {
-      console.error(`Error fetching solutions for vulnerability ${vulnerabilityId}:`, error.message);
-      throw new Error(`Failed to fetch vulnerability solutions: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get all assets from Rapid7
-   * 
-   * @param {Object} options - Query options
-   * @returns {Promise<Array>} - Array of assets
-   */
-  async getAssets(options = {}) {
-    try {
-      const { page = 0, size = 100, sort = 'id,asc' } = options;
-      const response = await this.client.get('/assets', {
-        params: {
-          page,
-          size,
-          sort
-        }
-      });
-      
-      return response.data.resources;
-    } catch (error) {
-      console.error('Error fetching assets from Rapid7:', error.message);
-      throw new Error(`Failed to fetch assets: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get asset details by ID
-   * 
-   * @param {string} assetId - Asset ID
-   * @returns {Promise<Object>} - Asset details
-   */
-  async getAssetById(assetId) {
-    try {
-      const response = await this.client.get(`/assets/${assetId}`);
-      return response.data;
-    } catch (error) {
-      console.error(`Error fetching asset ${assetId} from Rapid7:`, error.message);
-      throw new Error(`Failed to fetch asset details: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Start a scan on a site
-   * 
-   * @param {string} siteId - Site ID in Rapid7
-   * @param {string} projectId - Our internal project ID
-   * @returns {Promise<Object>} - Scan information
-   */
-  async startScan(siteId, projectId) {
-    try {
-      // Create scan history record first
-      const scanHistory = await ScanHistory.create({
-        source: 'rapid7',
-        project_id: projectId,
-        scan_type: 'Full',
-        status: 'Scheduled'
-      });
-      
-      // Start the scan in Rapid7
-      const response = await this.client.post(`/sites/${siteId}/scans`, {
-        name: `Project Scan ${new Date().toISOString()}`,
-        engineId: 1  // Using default engine, adjust as needed
-      });
-      
-      // Update scan history with Rapid7 scan ID
-      await ScanHistory.update(scanHistory.id, {
-        scan_id: response.data.id,
-        status: 'Running',
-        started_at: new Date()
-      });
-      
-      return {
-        scanHistoryId: scanHistory.id,
-        rapid7ScanId: response.data.id,
-        status: 'started'
-      };
-    } catch (error) {
-      console.error(`Error starting scan for site ${siteId}:`, error.message);
-      throw new Error(`Failed to start scan: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get scan status
-   * 
-   * @param {string} scanId - Scan ID in Rapid7
-   * @returns {Promise<Object>} - Scan status
-   */
-  async getScanStatus(scanId) {
-    try {
-      const response = await this.client.get(`/scans/${scanId}`);
-      return response.data;
-    } catch (error) {
-      console.error(`Error fetching scan status for ${scanId}:`, error.message);
-      throw new Error(`Failed to fetch scan status: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Import vulnerabilities from a completed scan
-   * 
-   * @param {string} scanId - Scan ID in Rapid7
-   * @param {string} scanHistoryId - Our internal scan history ID
-   * @returns {Promise<Object>} - Import results
-   */
-  async importVulnerabilitiesFromScan(scanId, scanHistoryId) {
-    try {
-      // Ensure client is using latest API settings
-      await this.refreshClient();
-      
-      // Get scan results
-      const scan = await this.getScanStatus(scanId);
-      
-      if (scan.status !== 'finished') {
-        throw new Error(`Scan ${scanId} is not finished yet`);
-      }
-      
-      // Get vulnerabilities for each asset in the scan
-      const vulnerabilities = [];
-      
-      for (const assetId of scan.assets) {
-        const assetVulns = await this.getVulnerabilitiesForAsset(assetId);
-        
-        // For each vulnerability, get full details
-        for (const vulnRef of assetVulns) {
-          const vulnDetails = await this.getVulnerabilityById(vulnRef.id);
-          
-          // Get solutions
-          const solutions = await this.getSolutions(vulnRef.id);
-          const remediation = solutions && solutions.length > 0 ? solutions[0].summary : null;
-          
-          // Get asset details
-          const asset = await this.getAssetById(assetId);
-          
-          // Add to list for database insertion
-          vulnerabilities.push({
-            id: vulnDetails.id,
-            title: vulnDetails.title,
-            description: vulnDetails.description,
-            severity: vulnDetails.severity,
-            cvss_score: vulnDetails.cvss,
-            remediation: remediation,
-            asset_id: assetId,
-            asset_name: asset.hostName || asset.id,
-          });
-        }
-      }
-      
-      // Import vulnerabilities into our database
-      const savedVulns = [];
-      for (const vuln of vulnerabilities) {
-        const vulnId = await saveVulnerability(vuln);
-        savedVulns.push(vulnId);
-      }
-      
-      // Update scan history record
-      await updateScanHistory(scanId, 'Completed', vulnerabilities.length);
-      
-      // Update the last sync time in Redis
-      await redis.set('rapid7:last_sync', new Date().toISOString());
-      
-      return {
-        scanId,
-        importResults: {
-          total: vulnerabilities.length,
-          saved: savedVulns.length,
-          vulnerabilityIds: savedVulns
-        }
-      };
-    } catch (error) {
-      console.error(`Error importing vulnerabilities from scan ${scanId}:`, error.message);
-      throw new Error(`Failed to import vulnerabilities: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Get top vulnerabilities by CVSS score
-   * 
-   * @param {number} limit - Number of vulnerabilities to return
-   * @returns {Promise<Array>} - Array of vulnerabilities
-   */
-  /**
-   * Sync vulnerabilities from Rapid7 to local database
-   * This is the main method to call for syncing all data
-   */
-  async syncVulnerabilities() {
-    try {
-      // Ensure client is using latest API settings
-      await this.refreshClient();
-      
-      // Get all vulnerabilities
-      const vulns = await this.getVulnerabilities({ size: 100 });
-      
-      // Get all assets to associate with vulnerabilities
-      const assets = await this.getAssets({ size: 100 });
-      const assetMap = {};
-      assets.forEach(asset => {
-        assetMap[asset.id] = asset;
-      });
-      
-      // Format and save each vulnerability
-      const savedVulns = [];
-      for (const vuln of vulns) {
-        // Get additional details
-        const vulnDetails = await this.getVulnerabilityById(vuln.id);
-        const solutions = await this.getSolutions(vuln.id);
-        const remediation = solutions && solutions.length > 0 ? solutions[0].summary : null;
-        
-        // Find associated asset if available
-        const assetId = vuln.assets && vuln.assets.length > 0 ? vuln.assets[0] : null;
-        const asset = assetId ? assetMap[assetId] : null;
-        
-        // Save to database
-        const vulnData = {
-          id: vuln.id,
-          title: vuln.title,
-          description: vulnDetails.description || vuln.title,
-          severity: vuln.severity,
-          cvss_score: vuln.cvss || 0,
-          remediation: remediation,
-          asset_id: assetId,
-          asset_name: asset ? (asset.hostName || asset.id) : 'Unknown',
-        };
-        
-        const vulnId = await saveVulnerability(vulnData);
-        savedVulns.push(vulnId);
-      }
-      
-      // Create scan history record for this sync
-      const scanId = `sync-${Date.now()}`;
-      const query = `
-        INSERT INTO threat_model.scan_history 
-          (scan_id, status, start_time, end_time, total_vulnerabilities)
-        VALUES 
-          ($1, $2, $3, $4, $5)
-        RETURNING id`;
-        
-      const result = await db.query(query, [
-        scanId,
-        'Completed',
-        new Date(),
-        new Date(),
-        savedVulns.length
-      ]);
-      
-      // Update the last sync time in Redis
-      await redis.set('rapid7:last_sync', new Date().toISOString());
-      
-      return {
-        syncId: result.rows[0].id,
-        total: vulns.length,
-        saved: savedVulns.length
-      };
-    } catch (error) {
-      console.error('Error syncing vulnerabilities:', error);
-      throw new Error(`Failed to sync vulnerabilities: ${error.message}`);
-    }
-  }
-  
-  async getTopVulnerabilities(limit = 10) {
-    try {
-      // Query directly from our database
-      const query = `
-        SELECT id, external_id, title, severity, cvss_score, status, 
-               asset_name, created_at
-        FROM threat_model.vulnerabilities
-        ORDER BY cvss_score DESC NULLS LAST
-        LIMIT $1`;
-      
-      const result = await db.query(query, [limit]);
-      return result.rows;
-    } catch (error) {
-      console.error('Error fetching top vulnerabilities:', error.message);
-      throw new Error(`Failed to fetch top vulnerabilities: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Map Rapid7 assets to our internal components
-   * 
-   * @param {Array} assets - Array of Rapid7 assets
-   * @param {Function} componentMatcher - Function to match assets to components
-   * @returns {Promise<Object>} - Mapping results
-   */
-  /**
-   * Check API connectivity to Rapid7
-   * @returns {Promise<boolean>} - True if connection successful
+   * Check connection to Rapid7 API
+   * @returns {Promise<boolean>} - True if connection is successful
    */
   async checkConnection() {
     try {
-      // Ensure client is using latest API settings
+      // Force refresh client to ensure we have the latest settings from Redis
       await this.refreshClient();
       
-      // Make a simple API call to check connectivity
-      await this.client.get('/assets?size=1');
-      return true;
+      // If API URL is empty, use default but log a warning
+      if (!this.apiUrl) {
+        console.warn('Rapid7 API URL is empty, using default');
+        this.apiUrl = 'https://us.api.insight.rapid7.com';
+      }
+      
+      // Very minimal API key validation - just log a warning if empty
+      if (!this.apiKey) {
+        console.warn('Rapid7 API key is empty');
+        throw new Error('API key is required for Rapid7 connection');
+      }
+      
+      // Log connection attempt
+      console.log(`Attempting to connect to Rapid7 API with URL: ${this.apiUrl}`);
+      
+      // Mask API key for logging
+      let maskedKey = 'HIDDEN';
+      if (this.apiKey && this.apiKey.length > 8) {
+        maskedKey = this.apiKey.substring(0, 4) + '...' + this.apiKey.substring(this.apiKey.length - 4);
+      }
+      console.log(`Using API key: ${maskedKey}`);
+      
+      // Format the URL properly
+      const axios = require('axios');
+      try {
+        logger.debug('Sending Rapid7 validation request', { url: validationUrl });
+        
+        // Use exactly the same approach as the working curl command
+        const response = await axios({
+          method: 'GET',
+          url: validationUrl,
+          headers: {
+            'X-Api-Key': this.apiKey,
+            'Accept': 'application/json'
+          },
+          timeout: 30000, // 30 seconds timeout for slow connections
+          validateStatus: () => true, // Don't throw on any status code
+          maxRedirects: 5 // Allow redirects
+        });
+        
+        logger.debug('Rapid7 validation response received', { 
+          status: response.status,
+          statusText: response.statusText,
+          dataReceived: !!response.data
+        });
+        
+        // Check if the response is valid
+        if (response.status >= 200 && response.status < 300) {
+          logger.info('Rapid7 connection validated successfully');
+          return true;
+        } else {
+          logger.error('Rapid7 validation failed', { 
+            status: response.status,
+            statusText: response.statusText,
+            data: response.data
+          });
+          
+          // Try to extract a meaningful error message
+          let errorMessage = 'Connection failed. Check your API URL and key.';
+          
+          // Add more details if available
+          if (response.data && response.data.message) {
+            errorMessage = response.data.message;
+          } else if (response.statusText) {
+            errorMessage = response.statusText;
+          }
+          
+          throw new Error(errorMessage);
+        }
+      } catch (error) {
+        logger.error('Error validating Rapid7 connection', { message: error.message }, error);
+        
+        let errorMessage = 'Connection failed. Check your API URL and key.';
+        
+        // Add more details if available
+        if (error.response) {
+          errorMessage = `API responded with status ${error.response.status}. Check your API key.`;
+        } else if (error.code) {
+          errorMessage = `Network error: ${error.code}. Check your API URL.`;
+        }
+        
+        logger.error('Rapid7 connection validation error', { errorMessage });
+        throw new Error(errorMessage);
+      }
     } catch (error) {
-      console.error('Rapid7 connectivity check failed:', error.message);
-      return false;
+      logger.error('Rapid7 connectivity check failed', { message: error.message }, error);
+      throw error;
     }
   }
   

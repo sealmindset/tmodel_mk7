@@ -6,6 +6,9 @@ const { Configuration, OpenAIApi } = require('openai');
 const redisUtil = require('./redis');
 const redisClient = redisUtil.client;
 
+// Initialize logger
+const logger = require('./logger').forModule('openai');
+
 // Redis key constants
 const OPENAI_API_KEY_REDIS_KEY = 'settings:openai:api_key';
 
@@ -21,6 +24,7 @@ const getApiKey = async () => {
       const pool = require('../db/db');
       
       // Query the database directly
+      logger.debug('Attempting to retrieve OpenAI API key from PostgreSQL');
       const result = await pool.query(
         'SELECT api_key FROM api_keys WHERE provider = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1',
         ['openai']
@@ -30,48 +34,50 @@ const getApiKey = async () => {
         const apiKey = result.rows[0].api_key;
         if (apiKey && apiKey.length > 0) {
           if (!apiKeyMessageLogged) {
-            console.log('Successfully loaded OpenAI API key from PostgreSQL database');
+            logger.info('Successfully loaded OpenAI API key from PostgreSQL database');
             apiKeyMessageLogged = true;
           }
           // Store in Redis for faster access next time
           try {
             await redisClient.set(OPENAI_API_KEY_REDIS_KEY, apiKey);
-            console.log('Cached PostgreSQL API key in Redis');
+            logger.debug('Cached PostgreSQL API key in Redis');
           } catch (redisError) {
-            console.warn('Failed to cache PostgreSQL API key in Redis:', redisError.message);
+            logger.warn('Failed to cache PostgreSQL API key in Redis', null, redisError);
           }
           return apiKey;
         }
       }
     } catch (pgError) {
-      console.warn('Error retrieving API key from PostgreSQL:', pgError.message);
+      logger.warn('Error retrieving API key from PostgreSQL', null, pgError);
     }
     
     // Second, try to get from Redis
+    logger.debug('Attempting to retrieve OpenAI API key from Redis');
     const redisApiKey = await redisClient.get(OPENAI_API_KEY_REDIS_KEY);
     
     if (redisApiKey && redisApiKey.length > 0) {
       if (!apiKeyMessageLogged) {
-        console.log('Successfully loaded OpenAI API key from Redis settings');
+        logger.info('Successfully loaded OpenAI API key from Redis settings');
         apiKeyMessageLogged = true;
       }
       return redisApiKey;
     }
     
     // If not in PostgreSQL or Redis, check environment variables as last resort
+    logger.debug('Attempting to retrieve OpenAI API key from environment variables');
     const envApiKey = process.env.OPENAI_API_KEY || process.env.API_KEY || '';
     
     if (!envApiKey) {
-      console.warn('OpenAI API key not found in PostgreSQL, Redis, or environment variables');
+      logger.warn('OpenAI API key not found in PostgreSQL, Redis, or environment variables');
     } else if (!apiKeyMessageLogged) {
       // Only log this message once per server startup
-      console.log('Successfully loaded OpenAI API key from environment variables (fallback)');
+      logger.info('Successfully loaded OpenAI API key from environment variables (fallback)');
       apiKeyMessageLogged = true;
     }
     
     return envApiKey;
   } catch (error) {
-    console.error('Error retrieving API key:', error);
+    logger.error('Error retrieving API key', null, error);
     // Fall back to environment variables
     return process.env.OPENAI_API_KEY || process.env.API_KEY || '';
   }
@@ -96,11 +102,17 @@ let openai = new OpenAIApi(configuration);
 const refreshClient = async () => {
   try {
     const apiKey = await getApiKey();
-    console.log('refreshClient - API key retrieved, length:', apiKey ? apiKey.length : 0);
+    logger.debug('API key retrieved for client refresh', { 
+      keyLength: apiKey ? apiKey.length : 0,
+      keyAvailable: !!apiKey
+    });
+    
     if (apiKey) {
-      console.log('refreshClient - API key starts with:', apiKey.substring(0, 4));
+      // Only log first few characters of API key for debugging
+      const keyStart = apiKey.substring(0, 4);
+      logger.debug(`API key starts with: ${keyStart}...`);
     } else {
-      console.log('refreshClient - No API key available!');
+      logger.warn('No API key available for OpenAI client refresh');
     }
     
     // Create a new configuration with the API key
@@ -108,10 +120,10 @@ const refreshClient = async () => {
     
     // Create a new OpenAI API client
     openai = new OpenAIApi(configuration);
-    console.log('refreshClient - OpenAI client refreshed with new key');
+    logger.info('OpenAI client refreshed with new key');
     return true;
   } catch (error) {
-    console.error('Error refreshing OpenAI client:', error);
+    logger.error('Error refreshing OpenAI client', null, error);
     return false;
   }
 };
@@ -378,6 +390,69 @@ const verifyApiKey = async () => {
   }
 };
 
+/**
+ * Test connection to OpenAI API with a provided API key
+ * @param {string} apiKey - The API key to test
+ * @returns {Promise<Object>} - { success: boolean, models?: Array, error?: string }
+ */
+const testConnection = async (apiKey) => {
+  try {
+    if (!apiKey) {
+      return { success: false, error: 'API key is required' };
+    }
+
+    // Make a lightweight API call to verify the key
+    const response = await fetch('https://api.openai.com/v1/models', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return { 
+        success: false, 
+        error: errorData.error?.message || `API returned ${response.status}: ${response.statusText}`
+      };
+    }
+    
+    // Parse the response to get models
+    const data = await response.json();
+    
+    // Filter for chat/completion models and extract useful info
+    const models = data.data
+      .filter(model => model.id.startsWith('gpt-'))
+      .map(model => ({
+        id: model.id,
+        name: model.id.replace('gpt-', 'GPT-').replace(/-([0-9])/, ' $1'),
+        created: model.created,
+        owned_by: model.owned_by
+      }))
+      .sort((a, b) => b.created - a.created); // Sort newest first
+    
+    // Cache API key in Redis for future use
+    try {
+      await redisClient.set(OPENAI_API_KEY_REDIS_KEY, apiKey);
+      logger.debug('Cached tested API key in Redis');
+    } catch (redisError) {
+      logger.warn('Failed to cache tested API key in Redis', redisError);
+    }
+    
+    return { 
+      success: true,
+      models
+    };
+  } catch (error) {
+    logger.error('Error testing OpenAI connection', error);
+    return { 
+      success: false, 
+      error: error.message || 'Unknown error occurred'
+    };
+  }
+};
+
 module.exports = {
   openai,
   checkStatus,
@@ -388,5 +463,6 @@ module.exports = {
   refreshClient,
   fetchAvailableModels,
   getPreferredOpenAIConfig,
-  verifyApiKey
+  verifyApiKey,
+  testConnection
 };

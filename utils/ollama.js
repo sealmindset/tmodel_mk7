@@ -235,11 +235,91 @@ const getChatCompletion = async (messages, model = 'llama3.3', maxTokens = 100) 
   }
 };
 
+/**
+ * Test connection to Ollama API with a provided API URL
+ * @param {string} apiUrl - The API URL to test (e.g., 'http://localhost:11434')
+ * @returns {Promise<Object>} - { success: boolean, models?: Array, error?: string }
+ */
+const testConnection = async (apiUrl) => {
+  try {
+    if (!apiUrl) {
+      return { success: false, error: 'API URL is required' };
+    }
+    
+    // Normalize API URL format
+    let baseUrl = apiUrl;
+    if (baseUrl.endsWith('/')) {
+      baseUrl = baseUrl.slice(0, -1);
+    }
+    if (baseUrl.endsWith('/api')) {
+      baseUrl = baseUrl.slice(0, -4);
+    }
+    
+    // Make a request to get available models
+    const response = await axios.get(`${baseUrl}/api/tags`, {
+      timeout: 5000 // 5-second timeout
+    });
+    
+    if (response.status !== 200) {
+      return { 
+        success: false, 
+        error: `API returned ${response.status}: ${response.statusText}`
+      };
+    }
+    
+    // Check if response has the expected structure
+    if (!response.data || !response.data.models || !Array.isArray(response.data.models)) {
+      return { 
+        success: false, 
+        error: 'Invalid API response structure'
+      };
+    }
+    
+    // Extract useful model information
+    const models = response.data.models.map(model => ({
+      name: model.name,
+      modified_at: model.modified_at,
+      size: model.size,
+      digest: model.digest?.substring(0, 8) || ''
+    }));
+    
+    // Cache API URL in Redis (using environment variables to avoid circular dependency)
+    try {
+      const redis = require('./redis');
+      await redis.client.set('settings:ollama:api_url', baseUrl);
+      console.log('Cached tested Ollama API URL in Redis');
+    } catch (redisError) {
+      console.warn('Failed to cache Ollama API URL in Redis:', redisError.message);
+    }
+    
+    return { 
+      success: true,
+      models
+    };
+  } catch (error) {
+    console.error('Error testing Ollama connection:', error.message);
+    
+    // Provide more detailed error information
+    let errorMessage = error.message;
+    if (error.code === 'ECONNREFUSED') {
+      errorMessage = `Connection refused at ${apiUrl}. Make sure Ollama is running.`;
+    } else if (error.code === 'ETIMEDOUT' || error.code === 'TIMEOUT') {
+      errorMessage = `Connection to ${apiUrl} timed out. Check your network or if Ollama is running.`;
+    }
+    
+    return { 
+      success: false, 
+      error: errorMessage
+    };
+  }
+};
+
 module.exports = {
   checkStatus,
   getCompletion,
   getChatCompletion,
   getModels,
   getApiEvents,
-  logApiEvent
+  logApiEvent,
+  testConnection
 };

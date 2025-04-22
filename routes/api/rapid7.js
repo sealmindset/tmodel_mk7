@@ -246,4 +246,105 @@ router.get('/scan-history/stats', ensureAuthenticated, async (req, res) => {
   }
 });
 
+/**
+ * @route   POST /api/rapid7/test-connection
+ * @desc    Test connection to Rapid7 API using the /validate endpoint
+ * @access  Private
+ */
+router.post('/test-connection', ensureAuthenticated, async (req, res) => {
+  try {
+    const { apiUrl, apiKey } = req.body;
+    
+    if (!apiUrl || !apiKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'API URL and API Key are required'
+      });
+    }
+    
+    console.log('Testing Rapid7 connection with provided credentials:');
+    console.log('- API URL:', apiUrl);
+    console.log('- API Key length:', apiKey ? apiKey.length : 0);
+    
+    // Initialize the service with the provided credentials
+    rapid7Service.init({
+      apiUrl: apiUrl,
+      apiKey: apiKey
+    });
+    
+    // Use the service's checkConnection method which has been updated
+    // to properly validate the connection
+    try {
+      const isConnected = await rapid7Service.checkConnection();
+      
+      console.log('Rapid7 connection test result:', isConnected ? 'SUCCESS' : 'FAILED');
+      
+      // If we get here, the connection was successful
+      return res.json({
+        success: true,
+        message: 'Connection successful',
+        status: 'UP'
+      });
+    } catch (error) {
+      console.error('Error validating Rapid7 connection:', error.message);
+      
+      // Extract a user-friendly error message
+      let errorMessage = error.message || 'Connection failed. Check your API URL and key.';
+      
+      // Return a structured error response
+      return res.status(400).json({
+        success: false,
+        message: errorMessage,
+        error: error.message
+      });
+    }
+  } catch (error) {
+    console.error('Error in Rapid7 test connection route:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error testing Rapid7 connection: ' + error.message
+    });
+  }
+});
+
+/**
+ * @route   POST /api/rapid7/parse-openapi
+ * @desc    Parse an OpenAPI specification file for Rapid7
+ * @access  Private
+ */
+router.post('/parse-openapi', ensureAuthenticated, async (req, res) => {
+  try {
+    if (!req.files || !req.files.openapi_file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+    
+    const file = req.files.openapi_file;
+    
+    // Check if the file is a JSON file
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please upload a JSON file'
+      });
+    }
+    
+    // Parse the OpenAPI spec using the service
+    const result = await rapid7Service.parseOpenApiSpec(file.data.toString());
+    
+    res.json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error('Error parsing OpenAPI spec:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error parsing OpenAPI spec: ' + error.message
+    });
+  }
+});
+
 module.exports = router;

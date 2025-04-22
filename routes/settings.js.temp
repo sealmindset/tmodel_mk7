@@ -1,0 +1,1026 @@
+/**
+ * Settings Routes
+ */
+const express = require('express');
+const router = express.Router();
+const redisUtil = require('../utils/redis');
+const openaiUtil = require('../utils/openai');
+const ollamaUtil = require('../utils/ollama');
+const redisClient = redisUtil.client;
+
+// Import auth middleware
+let ensureAuthenticated;
+try {
+  ensureAuthenticated = require('../auth')(express()).ensureAuthenticated;
+} catch (error) {
+  console.log('Using direct middleware import for auth');
+  ensureAuthenticated = require('../middleware/auth').ensureAuthenticated;
+}
+
+// Constants for Redis keys
+const OPENAI_API_KEY_REDIS_KEY = 'settings:openai:api_key';
+const OPENAI_MODEL_REDIS_KEY = 'settings:api:openai:model'; // Updated to match app.js keys
+const LLM_PROVIDER_REDIS_KEY = 'settings:llm:provider';
+const OLLAMA_MODEL_REDIS_KEY = 'settings:api:ollama:model'; // Updated to match app.js keys
+
+// Debug all Redis keys on startup
+console.log('Settings.js - Redis key constants:');
+console.log('OPENAI_API_KEY_REDIS_KEY:', OPENAI_API_KEY_REDIS_KEY);
+console.log('OPENAI_MODEL_REDIS_KEY:', OPENAI_MODEL_REDIS_KEY);
+console.log('LLM_PROVIDER_REDIS_KEY:', LLM_PROVIDER_REDIS_KEY);
+console.log('OLLAMA_MODEL_REDIS_KEY:', OLLAMA_MODEL_REDIS_KEY);
+
+// Debug endpoint to see all settings in Redis
+router.get('/debug', ensureAuthenticated, async (req, res) => {
+  try {
+    // Get all the settings from Redis
+    const keys = [
+      LLM_PROVIDER_REDIS_KEY,
+      OPENAI_MODEL_REDIS_KEY,
+      OLLAMA_MODEL_REDIS_KEY,
+      OPENAI_API_KEY_REDIS_KEY
+    ];
+    
+    const values = {};
+    for (const key of keys) {
+      values[key] = await redisClient.get(key);
+    }
+    
+    // Also get keys using pattern matching
+    const allSettingsKeys = await redisClient.keys('settings:*');
+    const allSettings = {};
+    for (const key of allSettingsKeys) {
+      allSettings[key] = await redisClient.get(key);
+    }
+    
+    res.json({
+      specificKeys: values,
+      allSettings: allSettings,
+      processEnv: {
+        LLM_PROVIDER: process.env.LLM_PROVIDER,
+        OPENAI_MODEL: process.env.OPENAI_MODEL,
+        OLLAMA_MODEL: process.env.OLLAMA_MODEL
+      }
+    });
+  } catch (error) {
+    console.error('Redis debug error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get API settings page
+router.get('/', ensureAuthenticated, async (req, res) => {
+  try {
+    // Get service status
+    const redisStatus = await checkRedisStatus();
+    const openaiStatus = await openaiUtil.checkStatus();
+    let ollamaStatus = false;
+    let availableOllamaModels = [];
+    
+    try {
+      ollamaStatus = await ollamaUtil.checkStatus();
+      if (ollamaStatus) {
+        availableOllamaModels = await ollamaUtil.getModels();
+      }
+    } catch (err) {
+      console.error('Error checking Ollama status:', err);
+    }
+    
+    // Get stored settings with debug logging
+    console.log('GET /api-settings - Starting to retrieve Redis values');
+    let openaiApiKey = await getStoredOpenAIKey() || '';
+    console.log('GET /api-settings - Retrieved OpenAI API key - length:', openaiApiKey ? openaiApiKey.length : 0);
+    
+    // Get each setting with careful error handling to ensure all values are retrieved
+    let openaiModel = '';
+    try {
+      // Directly use redisClient for maximum reliability
+      openaiModel = await redisClient.get(OPENAI_MODEL_REDIS_KEY);
+      console.log('GET /api-settings - Raw Redis openaiModel value:', openaiModel, 'from key', OPENAI_MODEL_REDIS_KEY);
+    } catch (err) {
+      console.error('Error getting OpenAI model from Redis:', err);
+    }
+    
+    // If not found, check the old key as fallback
+    if (!openaiModel) {
+      try {
+        openaiModel = await redisClient.get('settings:openai:model');
+        console.log('GET /api-settings - Fallback key value:', openaiModel, 'from key settings:openai:model');
+        
+        // If found in the old key, migrate it to the new key
+        if (openaiModel) {
+          console.log('Migrating value from old key to new key');
+          await redisClient.set(OPENAI_MODEL_REDIS_KEY, openaiModel);
+        }
+      } catch (err) {
+        console.error('Error checking fallback Redis key:', err);
+      }
+    }
+    
+    // Default as last resort
+    openaiModel = openaiModel || 'gpt-3.5-turbo';
+    console.log('GET /api-settings - Final openaiModel value to render:', openaiModel);
+    
+    let llmProvider = '';
+    try {
+      llmProvider = await getRedisValue(LLM_PROVIDER_REDIS_KEY);
+    } catch (err) {
+      console.error('Error getting LLM provider from Redis:', err);
+    }
+    llmProvider = llmProvider || 'openai';
+    
+    let ollamaModel = '';
+    try {
+      ollamaModel = await getRedisValue(OLLAMA_MODEL_REDIS_KEY);
+    } catch (err) {
+      console.error('Error getting Ollama model from Redis:', err);
+    }
+    ollamaModel = ollamaModel || 'llama3.3';
+    
+    // Always log all settings for debugging
+    console.log('GET /api-settings - Final settings values:');
+    console.log('GET /api-settings - Retrieved from Redis - llmProvider:', llmProvider);
+    console.log('GET /api-settings - Retrieved from Redis - openaiModel:', openaiModel);
+    console.log('GET /api-settings - Retrieved from Redis - ollamaModel:', ollamaModel);
+    console.log('GET /api-settings - Process env LLM_PROVIDER:', process.env.LLM_PROVIDER);
+    console.log('GET /api-settings - Process env OPENAI_MODEL:', process.env.OPENAI_MODEL);
+    console.log('GET /api-settings - Process env OLLAMA_MODEL:', process.env.OLLAMA_MODEL);
+    
+    // Ensure we have at least one model in the list
+    if (availableOllamaModels.length === 0) {
+      availableOllamaModels = [{ name: ollamaModel }];
+    }
+    
+    console.log('Available Ollama models:', JSON.stringify(availableOllamaModels));
+    // Make sure the saved model is in the exact same format as the models list
+    if (availableOllamaModels.length > 0) {
+      // Try to find an exact match first
+      const exactMatch = availableOllamaModels.find(model => model.name === ollamaModel);
+      // If no exact match, look for partial match (e.g., 'llama3.3' vs 'llama3.3:latest')
+      if (!exactMatch && ollamaModel) {
+        const partialMatch = availableOllamaModels.find(model => 
+          model.name.startsWith(ollamaModel) || ollamaModel.startsWith(model.name)
+        );
+        if (partialMatch) {
+          console.log(`Found partial match: ${ollamaModel} => ${partialMatch.name}`);
+          ollamaModel = partialMatch.name;
+        }
+      }
+    }
+    
+    // Rapid7 settings from Redis
+    let rapid7ApiUrl = await redisClient.get('settings:rapid7:api_url') || 'http://localhost:3100';
+    let rapid7ApiKey = await redisClient.get('settings:rapid7:api_key') || '';
+    
+    // Ollama API URL from Redis
+    let ollamaApiUrl = await redisClient.get('settings:ollama:api_url') || 'http://localhost:11434';
+    
+    // PostgreSQL settings from Redis or environment variables
+    let postgresqlHost = await redisClient.get('settings:postgresql:host') || process.env.POSTGRES_HOST || 'localhost';
+    let postgresqlPort = await redisClient.get('settings:postgresql:port') || process.env.POSTGRES_PORT || '5432';
+    let postgresqlDatabase = await redisClient.get('settings:postgresql:database') || process.env.POSTGRES_DB || 'tmodel';
+    let postgresqlUser = await redisClient.get('settings:postgresql:user') || process.env.POSTGRES_USER || 'postgres';
+    let postgresqlPassword = await redisClient.get('settings:postgresql:password') || process.env.POSTGRES_PASSWORD || '';
+    let pgStatus = await checkPostgresStatus();
+    
+    // Redis settings from Redis or environment variables
+    let redisHost = await redisClient.get('settings:redis:host') || process.env.REDIS_HOST || 'localhost';
+    let redisPort = await redisClient.get('settings:redis:port') || process.env.REDIS_PORT || '6379';
+    let redisPassword = await redisClient.get('settings:redis:password') || process.env.REDIS_PASSWORD || '';
+    
+    // Get message from session if any
+    const message = req.session.message;
+    req.session.message = null;
+    
+    res.render('api-settings', {
+      openaiApiKey,
+      openaiModel,
+      openaiStatus,
+      redisStatus,
+      ollamaStatus,
+      ollamaModel,
+      ollamaApiUrl,
+      llmProvider,
+      availableOllamaModels,
+      rapid7ApiUrl,
+      rapid7ApiKey,
+      rapid7Status: false, // Default to false until we implement a proper check
+      postgresqlHost,
+      postgresqlPort,
+      postgresqlDatabase,
+      postgresqlUser,
+      postgresqlPassword,
+      pgStatus,
+      redisHost,
+      redisPort,
+      redisPassword,
+      message
+    });
+  } catch (error) {
+    console.error('Error loading API settings:', error);
+    res.render('api-settings', {
+      openaiApiKey: '',
+      openaiModel: 'gpt-3.5-turbo',
+      openaiStatus: false,
+      redisStatus: false,
+      ollamaStatus: false,
+      ollamaModel: 'llama3.3',
+      ollamaApiUrl: 'http://localhost:11434',
+      llmProvider: 'openai',
+      availableOllamaModels: [],
+      rapid7Status: false,
+      rapid7ApiUrl: 'http://localhost:3100',
+      rapid7ApiKey: '',
+      postgresqlHost: process.env.POSTGRES_HOST || 'localhost',
+      postgresqlPort: process.env.POSTGRES_PORT || '5432',
+      postgresqlDatabase: process.env.POSTGRES_DB || 'tmodel',
+      postgresqlUser: process.env.POSTGRES_USER || 'postgres',
+      postgresqlPassword: process.env.POSTGRES_PASSWORD || '',
+      pgStatus: false,
+      redisHost: process.env.REDIS_HOST || 'localhost',
+      redisPort: process.env.REDIS_PORT || '6379',
+      redisPassword: process.env.REDIS_PASSWORD || '',
+      message: {
+        type: 'danger',
+        text: 'Error loading settings: ' + error.message
+      }
+    });
+  }
+});
+
+// Debug endpoint for directly setting LLM provider in Redis
+router.get('/force-provider/:provider', ensureAuthenticated, async (req, res) => {
+  try {
+    const provider = req.params.provider || 'openai';
+    console.log(`Direct setting of LLM provider to ${provider}`);
+    
+    // Force direct Redis SET operation for the provider
+    await redisClient.set(LLM_PROVIDER_REDIS_KEY, provider);
+    
+    // Verify it was set correctly
+    const verifiedProvider = await redisClient.get(LLM_PROVIDER_REDIS_KEY);
+    
+    res.json({
+      success: true,
+      requested: provider,
+      actual: verifiedProvider,
+      redisKey: LLM_PROVIDER_REDIS_KEY
+    });
+  } catch (error) {
+    console.error('Error in direct provider setting:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Test endpoint for directly setting OpenAI model
+router.get('/set-model/:model', ensureAuthenticated, async (req, res) => {
+  try {
+    const model = req.params.model || 'gpt-4';
+    console.log(`Direct setting of OpenAI model to ${model}`);
+    
+    // Save directly to Redis
+    await redisClient.set(OPENAI_MODEL_REDIS_KEY, model);
+    
+    // Verify
+    const verifiedModel = await redisClient.get(OPENAI_MODEL_REDIS_KEY);
+    console.log(`Directly set model: ${model}, verified: ${verifiedModel}`);
+    
+    // Clean up old keys
+    await redisClient.del('settings:openai:model');
+    
+    res.json({
+      success: true,
+      model: model,
+      verifiedModel: verifiedModel,
+      redisKey: OPENAI_MODEL_REDIS_KEY
+    });
+  } catch (error) {
+    console.error('Error in direct model setting:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+router.post('/', ensureAuthenticated, async (req, res) => {
+  // Initialize variables
+  let connectionValid = false;
+  let successMessage = 'Settings saved successfully.';
+  const savedSettings = [];
+  const logger = require('../utils/logger').forModule('settings');
+  
+  try {
+    // Extract all form values
+    const {
+      llmProvider,
+      openaiApiKey,
+      openaiModel,
+      ollamaModel,
+      rapid7ApiUrl,
+      rapid7ApiKey,
+      settingsType,
+      postgresqlHost,
+      postgresqlPort,
+      postgresqlDatabase,
+      postgresqlUser,
+      postgresqlPassword,
+      redisHost,
+      redisPort,
+      redisPassword
+    } = req.body;
+    
+    logger.info('Form submission received', {
+      provider: llmProvider,
+      settingsType: settingsType || 'unknown'
+    });
+    
+    // Save OpenAI API key if provided and OpenAI is selected
+    if (llmProvider === 'openai' && openaiApiKey) {
+      try {
+        await storeOpenAIKey(openaiApiKey);
+        logger.info('OpenAI API Key saved to Redis');
+        savedSettings.push('OpenAI API Key');
+      } catch (err) {
+        logger.error('Error saving OpenAI API Key', null, err);
+        throw new Error('Error saving OpenAI API Key: ' + err.message);
+      }
+    }
+    
+    // Save OpenAI model if provided and OpenAI is selected
+    if (llmProvider === 'openai' && openaiModel) {
+      try {
+        await redisClient.set(OPENAI_MODEL_REDIS_KEY, openaiModel);
+        logger.info('OpenAI Model saved to Redis', { model: openaiModel });
+        savedSettings.push('OpenAI Model');
+      } catch (err) {
+        logger.error('Error saving OpenAI Model', null, err);
+        throw new Error('Error saving OpenAI Model: ' + err.message);
+      }
+    }
+    
+    console.log('-------------------------------------------------');
+    console.log('FORM SUBMISSION RECEIVED');
+    
+    console.log('[DEBUG] Extracted from req.body:', { 
+      llmProvider, 
+      openaiModel, 
+      ollamaModel,
+      rapid7ApiUrl: rapid7ApiUrl ? 'present' : 'missing',
+      rapid7ApiKey: rapid7ApiKey ? `present (length: ${rapid7ApiKey.length})` : 'missing',
+      postgresqlHost: postgresqlHost ? 'present' : 'missing',
+      redisHost: redisHost ? 'present' : 'missing'
+    });
+    console.log('-------------------------------------------------');
+    console.log('POST /api-settings - Raw form data:', JSON.stringify(req.body, null, 2));
+    
+    // First, log all existing Redis values before making any changes
+    console.log('CURRENT REDIS VALUES BEFORE CHANGES:');
+    
+    // Check if any values are undefined, null, or empty strings
+    if (!openaiModel) console.log('WARNING: openaiModel is falsy:', openaiModel);
+    if (!ollamaModel) console.log('WARNING: ollamaModel is falsy:', ollamaModel);
+    if (!llmProvider) console.log('WARNING: llmProvider is falsy:', llmProvider);
+    
+    // Validate LLM Provider settings
+    if (llmProvider && !['openai', 'ollama'].includes(llmProvider)) {
+      throw new Error('Invalid LLM provider. Must be either "openai" or "ollama"');
+    }
+    
+    // Ensure we have values for all settings, using strict defaults only if completely missing
+    const effectiveOpenAiModel = openaiModel || 'gpt-3.5-turbo';
+    const effectiveOllamaModel = ollamaModel || 'llama3.3';
+    const effectiveLlmProvider = llmProvider || 'openai';
+    
+    console.log('NORMALIZED VALUES TO SAVE:');
+    console.log('- effectiveLlmProvider:', effectiveLlmProvider);
+    console.log('- effectiveOpenAiModel:', effectiveOpenAiModel);
+    console.log('- effectiveOllamaModel:', effectiveOllamaModel);
+    
+    // Save LLM Provider settings
+    if (llmProvider) {
+      try {
+        console.log(`Saving LLM provider: ${llmProvider}`);
+        await redisClient.set(LLM_PROVIDER_REDIS_KEY, llmProvider);
+      } catch (error) {
+        console.error('Error saving LLM provider:', error);
+        throw new Error('Error saving LLM provider: ' + error.message);
+      }
+
+    // Process Rapid7 settings if provided
+    if (req.body.settingsType === 'rapid7') {
+      const logger = require('../utils/logger').forModule('settings');
+      logger.info('Processing Rapid7 settings');
+      
+      // Determine if this is an AJAX request
+      const isAjaxRequest = req.xhr || (req.headers.accept && req.headers.accept.indexOf('json') > -1) || req.get('Content-Type') === 'application/json';
+
+      try {
+        const rapid7ApiUrl = req.body.rapid7ApiUrl;
+        const rapid7ApiKey = req.body.rapid7ApiKey;
+
+        logger.debug('Processing Rapid7 settings', {
+          apiUrlProvided: !!rapid7ApiUrl,
+          apiKeyLength: rapid7ApiKey ? rapid7ApiKey.length : 0
+        });
+
+        // Validate Rapid7 API URL format
+        if (!isNonEmptyString(rapid7ApiUrl)) {
+          logger.warn('Rapid7 API URL is empty or invalid');
+          req.flash('warning', 'Rapid7 API URL is empty. Using default URL.');
+          // Use a default URL
+          rapid7ApiUrl = 'https://us.api.insight.rapid7.com';
+          logger.info('Using default Rapid7 API URL', { url: rapid7ApiUrl });
+        }
+
+        // Format the URL properly
+        let formattedUrl = rapid7ApiUrl.trim();
+
+        // Add https:// if missing
+        if (!formattedUrl.startsWith('http://') && !formattedUrl.startsWith('https://')) {
+          formattedUrl = 'https://' + formattedUrl;
+          logger.debug('Added https:// to URL', { url: formattedUrl });
+        }
+
+        // Remove trailing slash if present
+        if (formattedUrl.endsWith('/')) {
+          formattedUrl = formattedUrl.slice(0, -1);
+          logger.debug('Removed trailing slash from URL', { url: formattedUrl });
+        }
+
+        // Validate URL format
+        try {
+          new URL(formattedUrl);
+          logger.debug('Valid URL format', { url: formattedUrl });
+        } catch (urlError) {
+          logger.error('Invalid URL format', { url: formattedUrl }, urlError);
+          req.flash('error', 'Invalid URL format: ' + urlError.message);
+          throw new Error('Invalid URL format: ' + urlError.message);
+        }
+
+        logger.info('Saving Rapid7 API URL to Redis', { url: formattedUrl });
+        try {
+          // Use redisUtil.storeRedisValue instead of direct client access
+          await redisUtil.storeRedisValue('settings:rapid7:api_url', formattedUrl);
+          logger.info('Successfully saved Rapid7 API URL to Redis');
+          savedSettings.push('Rapid7 API URL');
+        } catch (redisError) {
+          logger.error('Redis error saving Rapid7 API URL', null, redisError);
+          throw new Error('Database error saving Rapid7 API URL: ' + redisError.message);
+        }
+
+        // Save Rapid7 API key with proper validation
+        if (!isNonEmptyString(rapid7ApiKey)) {
+          logger.warn('Rapid7 API key is empty or invalid');
+          // Don't save an empty API key
+          req.flash('warning', 'Rapid7 API key is empty. Please provide a valid API key.');
+        } else {
+          // Ensure we're working with a string
+          const apiKeyString = String(rapid7ApiKey).trim();
+          
+          // Log key details for debugging (without exposing the full key)
+          const keyStart = apiKeyString.substring(0, 4);
+          const keyEnd = apiKeyString.length > 8 ? apiKeyString.substring(apiKeyString.length - 4) : '****';
+          logger.debug('Processing Rapid7 API key', { 
+            keyPrefix: keyStart,
+            keySuffix: keyEnd,
+            keyLength: apiKeyString.length 
+          });
+          
+          // Only check if it's too short
+          if (apiKeyString.length < 8) {
+            logger.warn('Rapid7 API key is shorter than recommended');
+            req.flash('warning', 'Rapid7 API key is shorter than recommended but will be saved.');
+          }
+          
+          logger.info('Saving Rapid7 API key to Redis');
+          try {
+            // Use redisUtil.storeRedisValue instead of direct client access
+            await redisUtil.storeRedisValue('settings:rapid7:api_key', apiKeyString);
+            logger.info('Successfully saved Rapid7 API key to Redis');
+            savedSettings.push('Rapid7 API Key');
+            req.flash('success', 'Rapid7 API key saved successfully.');
+          } catch (redisError) {
+            logger.error('Redis error saving Rapid7 API key', null, redisError);
+            req.flash('error', 'Could not save Rapid7 API key: ' + redisError.message);
+            throw new Error('Database error saving Rapid7 API key: ' + redisError.message);
+          }
+        }
+    } catch (error) {
+      logger.error('Error saving Rapid7 settings', null, error);
+      
+      // If this was an AJAX request, return JSON
+      if (req.xhr || (req.headers.accept && req.headers.accept.indexOf('json') > -1)) {
+        return res.status(500).json({
+          success: false,
+          message: 'Error saving Rapid7 settings: ' + error.message
+        });
+      }
+      
+      // Otherwise redirect back to the settings page with flash message
+      req.flash('error', 'Error saving Rapid7 settings: ' + error.message);
+      return res.redirect('/api-settings#rapid7-tab');
+    }
+    }
+    
+    // For Rapid7 settings, return JSON response if it's an AJAX request
+    if (req.body.settingsType === 'rapid7') {
+      const isAjaxRequest = req.xhr || (req.headers.accept && req.headers.accept.indexOf('json') > -1) || req.get('Content-Type') === 'application/json';
+      
+      try {
+        if (isAjaxRequest) {
+          return res.json({
+            success: true,
+            message: successMessage,
+            savedSettings: savedSettings
+          });
+        } else {
+          req.flash('success', successMessage);
+          return res.redirect('/api-settings#rapid7-tab');
+        }
+      } catch (error) {
+        logger.error('Error handling Rapid7 settings response', null, error);
+        if (isAjaxRequest) {
+          return res.status(500).json({
+            success: false,
+            message: 'Error handling Rapid7 settings: ' + error.message
+          });
+        } else {
+          req.flash('error', 'Error handling Rapid7 settings: ' + error.message);
+          return res.redirect('/api-settings#rapid7-tab');
+        }
+      }
+    }
+    
+    // Validate Rapid7 API connection if settings were provided
+    let connectionValid = false;
+    if (req.body.settingsType === 'rapid7' && savedSettings.includes('Rapid7 API URL') && savedSettings.includes('Rapid7 API Key')) {
+      try {
+        logger.info('Testing Rapid7 connection after saving settings');
+        
+        // Get the saved settings from Redis
+        const apiUrl = await redisUtil.getRedisValue('settings:rapid7:api_url');
+        const apiKey = await redisUtil.getRedisValue('settings:rapid7:api_key');
+        
+        if (apiUrl && apiKey) {
+          // Make a test request to the API
+          const axios = require('axios');
+          
+          // Format the URL for validation
+          let validationUrl = apiUrl;
+          if (!validationUrl.endsWith('/validate')) {
+            validationUrl = `${validationUrl}/validate`;
+          }
+          
+          logger.debug('Testing connection to Rapid7 API', { url: validationUrl });
+          
+          const response = await axios({
+            method: 'GET',
+            url: validationUrl,
+            headers: {
+              'X-Api-Key': apiKey,
+              'Accept': 'application/json'
+            },
+            timeout: 10000, // 10 seconds timeout
+            validateStatus: () => true // Don't throw on any status code
+          });
+          
+          if (response.status === 200) {
+            logger.info('Rapid7 API connection validated successfully');
+            // Store the successful connection status in Redis
+            await redisUtil.storeRedisValue('settings:rapid7:connection_status', 'UP');
+            await redisUtil.storeRedisValue('settings:rapid7:last_connection_check', new Date().toISOString());
+            
+            successMessage += ' Rapid7 connection verified.';
+            connectionValid = true;
+          } else {
+            logger.warn('Rapid7 API connection validation failed', { 
+              status: response.status,
+              data: response.data 
+            });
+            
+            // Store the failed connection status in Redis
+            await redisUtil.storeRedisValue('settings:rapid7:connection_status', 'DOWN');
+            await redisUtil.storeRedisValue('settings:rapid7:last_connection_check', new Date().toISOString());
+            
+            successMessage += ' Warning: Rapid7 connection validation failed: ' + 
+              (response.data?.message || `Status code ${response.status}`);
+            connectionValid = false;
+          }
+        }
+      } catch (error) {
+        logger.error('Error validating Rapid7 connection', null, error);
+        // Don't redirect - just set a warning message and continue
+        // Settings are still saved even if validation fails
+        successMessage += ' Warning: Rapid7 connection validation failed: ' + error.message;
+        connectionValid = false;
+        
+        // Store the error status in Redis
+        try {
+          await redisUtil.storeRedisValue('settings:rapid7:connection_status', 'ERROR');
+          await redisUtil.storeRedisValue('settings:rapid7:last_connection_check', new Date().toISOString());
+        } catch (redisError) {
+          logger.error('Failed to store connection status in Redis', null, redisError);
+        }
+      }
+    }
+
+    // For Ollama, make sure we're saving the exact model name
+    // This handles cases where the model name might be different formats (e.g., llama3.3 vs llama3.3:latest)
+    let normalizedOllamaModel = effectiveOllamaModel;
+    if (effectiveLlmProvider === 'ollama') {
+      try {
+        // Get available models to verify against
+        const availableModels = await ollamaUtil.getModels();
+        console.log('Available models when saving:', JSON.stringify(availableModels));
+        
+        // Find exact match first
+        const exactMatch = availableModels.find(model => model.name === ollamaModel);
+        if (exactMatch) {
+          normalizedOllamaModel = exactMatch.name;
+        } else {
+          // Look for partial match
+          const partialMatch = availableModels.find(model => 
+            model.name.startsWith(ollamaModel) || ollamaModel.startsWith(model.name)
+          );
+          if (partialMatch) {
+            console.log(`Using full model name for save: ${ollamaModel} => ${partialMatch.name}`);
+            normalizedOllamaModel = partialMatch.name;
+          }
+        }
+      } catch (err) {
+        console.error('Error normalizing Ollama model name:', err);
+      }
+    }
+    
+    // Always store the selected LLM provider with direct Redis operations for maximum reliability
+    console.log('*****************************************************');
+    console.log('* CRITICAL DEBUG: SAVING LLM PROVIDER TO REDIS     *');
+    // Add null checks to prevent TypeError when accessing length property
+    const llmProviderStr = llmProvider || 'undefined';
+    const effectiveLlmProviderStr = effectiveLlmProvider || 'undefined';
+    console.log('* Provider from form: ' + llmProviderStr + ' (' + typeof llmProvider + ')' + ' '.repeat(Math.max(0, 25 - llmProviderStr.length)) + '*');
+    console.log('* Effective provider: ' + effectiveLlmProviderStr + ' (' + typeof effectiveLlmProvider + ')' + ' '.repeat(Math.max(0, 23 - effectiveLlmProviderStr.length)) + '*');
+    console.log('* Redis key: ' + LLM_PROVIDER_REDIS_KEY + ' '.repeat(Math.max(0, 36 - LLM_PROVIDER_REDIS_KEY.length)) + '*');
+    console.log('*****************************************************');
+    
+    try {
+      // IMPORTANT: First flush any existing Redis keys to ensure clean state
+      await redisClient.del(LLM_PROVIDER_REDIS_KEY);
+      console.log(`Deleted existing key ${LLM_PROVIDER_REDIS_KEY} to ensure clean state`);
+      
+      // Direct Redis operation to ensure it's saved correctly
+      console.log(`About to execute: redisClient.set('${LLM_PROVIDER_REDIS_KEY}', '${effectiveLlmProvider}')`);
+      await redisClient.set(LLM_PROVIDER_REDIS_KEY, effectiveLlmProvider);
+      console.log('Direct Redis SET completed for LLM provider');
+      
+      // Verify the save worked with direct Redis GET
+      console.log(`About to execute: redisClient.get('${LLM_PROVIDER_REDIS_KEY}')`);
+      const verifiedLlmProvider = await redisClient.get(LLM_PROVIDER_REDIS_KEY);
+      console.log('Verified Redis storage - raw value:', verifiedLlmProvider, 'type:', typeof verifiedLlmProvider);
+      
+      if (verifiedLlmProvider !== effectiveLlmProvider) {
+        console.error('ERROR: LLM provider verification failed! Expected:', effectiveLlmProvider, 'Got:', verifiedLlmProvider);
+        // Try again with a different approach if verification failed
+        await redisUtil.setValue(LLM_PROVIDER_REDIS_KEY, effectiveLlmProvider);
+        console.log('Attempted alternative save method using redisUtil.setValue');
+      } else {
+        console.log('SUCCESS: LLM provider saved successfully!');
+      }
+      
+      // Force verification from Redis again with alternate method
+      const doubleCheck = await redisUtil.getValue(LLM_PROVIDER_REDIS_KEY);
+      console.log('Double check with redisUtil.getValue:', doubleCheck);
+      
+      // Also update the environment variable to ensure consistency
+      process.env.LLM_PROVIDER = effectiveLlmProvider;
+      console.log('Updated process.env.LLM_PROVIDER to:', process.env.LLM_PROVIDER);
+    } catch (err) {
+      console.error('Error in direct Redis operations for LLM provider:', err);
+    }
+    
+    // Save OpenAI model with verification - direct Redis operations for maximum reliability
+    console.log('Saving OpenAI model to Redis:', effectiveOpenAiModel, 'to key', OPENAI_MODEL_REDIS_KEY);
+    
+    try {
+      // Direct Redis operation to ensure it's saved correctly
+      await redisClient.set(OPENAI_MODEL_REDIS_KEY, effectiveOpenAiModel);
+      console.log('Direct Redis SET completed for OpenAI model');
+      
+      // Also delete any old keys to clean up
+      await redisClient.del('settings:openai:model');
+      console.log('Cleaned up old openai model Redis key');
+        
+      // Verify the save worked with direct Redis GET
+      const verifiedOpenAIModel = await redisClient.get(OPENAI_MODEL_REDIS_KEY);
+      console.log('Verified Redis storage - openaiModel:', verifiedOpenAIModel, 'from key', OPENAI_MODEL_REDIS_KEY);
+
+      if (verifiedOpenAIModel !== effectiveOpenAiModel) {
+        console.error('ERROR: OpenAI model verification failed! Expected:', effectiveOpenAiModel, 'Got:', verifiedOpenAIModel);
+      }
+    } catch (err) {
+      console.error('Error in direct Redis operations for OpenAI model:', err);
+    }
+    
+    // Save Ollama model with verification
+    console.log('Saving Ollama model to Redis:', normalizedOllamaModel);
+    await storeRedisValue(OLLAMA_MODEL_REDIS_KEY, normalizedOllamaModel);
+    const verifiedOllamaModel = await getRedisValue(OLLAMA_MODEL_REDIS_KEY);
+    console.log('Verified Redis storage - ollamaModel:', verifiedOllamaModel);
+    
+    // Set the current values in the process environment
+    process.env.LLM_PROVIDER = verifiedLlmProvider || effectiveLlmProvider; // Use verified value if available
+    process.env.OPENAI_MODEL = verifiedOpenAIModel || effectiveOpenAiModel; // Use verified value if available
+    process.env.OLLAMA_MODEL = verifiedOllamaModel || normalizedOllamaModel; // Use verified value if available
+    
+    console.log('Saved to env - LLM_PROVIDER:', process.env.LLM_PROVIDER);
+    console.log('Saved to env - OPENAI_MODEL:', process.env.OPENAI_MODEL);
+    console.log('Saved to env - OLLAMA_MODEL:', process.env.OLLAMA_MODEL);
+    
+    // Success message
+    let successMessage = 'LLM settings saved successfully.';
+    
+    // Handle OpenAI-specific settings
+    if (llmProvider === 'openai') {
+      let currentApiKey = await getStoredOpenAIKey();
+      let apiKeyMessage = null;
+      
+      // If API key field was provided in the form
+      if (typeof openaiApiKey !== 'undefined') {
+        console.log('API key provided in form, length:', openaiApiKey ? openaiApiKey.length : 0);
+        // If non-empty API key provided, store it
+        if (openaiApiKey && openaiApiKey.trim() !== '') {
+          console.log('Storing non-empty API key to Redis, key starts with:', openaiApiKey.substring(0, 4));
+          // Store the provided API key in Redis
+          await storeOpenAIKey(openaiApiKey);
+          
+          // Set it as the current API key
+          process.env.OPENAI_API_KEY = openaiApiKey;
+          console.log('Set API key in process.env, key starts with:', process.env.OPENAI_API_KEY.substring(0, 4));
+          
+          // Update current API key reference
+          currentApiKey = openaiApiKey;
+        } else if (openaiApiKey.trim() === '') {
+          // If empty key provided (user cleared the field), keep using .env 
+          // but clear the stored Redis key
+          await storeOpenAIKey('');
+          delete process.env.OPENAI_API_KEY;
+          currentApiKey = process.env.OPENAI_API_KEY || '';
+          
+          // Inform user we're fallback to .env
+          apiKeyMessage = {
+            type: 'info',
+            text: 'API key cleared from settings. Using API key from .env file if available.'
+          };
+        }
+      }
+      
+      // Test the connection regardless of where the key comes from
+      const openaiStatus = await openaiUtil.checkStatus();
+      
+      if (openaiStatus) {
+        successMessage += ' OpenAI connection verified.';
+        
+        // If we have a specific message about the API key, show that instead
+        if (apiKeyMessage) {
+          req.session.message = {
+            type: apiKeyMessage.type,
+            text: apiKeyMessage.text + ' Connection successful!'
+          };
+          res.redirect('/api-settings');
+          return;
+        }
+      } else {
+        // Connection failed
+        if (!currentApiKey) {
+          req.session.message = {
+            type: 'warning',
+            text: 'No OpenAI API key found in settings or environment variables. This is required for OpenAI provider.'
+          };
+        } else {
+          req.session.message = {
+            type: 'warning',
+            text: 'Settings saved but OpenAI connection test failed. Check your API key.'
+          };
+        }
+        res.redirect('/api-settings');
+        return;
+      }
+    }
+    
+    // Handle Ollama-specific settings  
+    if (effectiveLlmProvider === 'ollama') {
+      // Test the Ollama connection
+      const ollamaStatus = await ollamaUtil.checkStatus();
+      
+      if (ollamaStatus) {
+        // Check if the specified model exists
+        const models = await ollamaUtil.getModels();
+        const modelExists = models.some(model => model.name === ollamaModel);
+        
+        if (!modelExists) {
+          req.session.message = {
+            type: 'warning',
+            text: `Settings saved but model '${ollamaModel}' was not found in Ollama. You may need to pull it first.`
+          };
+          return res.redirect('/api-settings');
+        }
+        
+        successMessage += ' Ollama connection verified.';
+        savedSettings.push('Ollama settings');
+      } else {
+        req.session.message = {
+          type: 'warning',
+          text: 'Settings saved but Ollama connection failed. Is Ollama running?'
+        };
+        return res.redirect('/api-settings');
+      }
+    }
+    
+    // All settings saved successfully, set success message with details
+    if (savedSettings.length > 0) {
+      successMessage += ` Updated: ${savedSettings.join(', ')}.`;
+    }
+    
+    // Check if this is an API request (Content-Type: application/json or XHR)
+    const isApiRequest = req.get('Content-Type') === 'application/json' || req.xhr;
+    
+    if (isApiRequest) {
+      // Return JSON response for API requests
+      return res.json({
+        success: true,
+        message: successMessage,
+        connectionValid: connectionValid || false,
+        savedSettings: savedSettings
+      });
+    } else {
+      // Set success message in session for web requests
+      req.session.message = {
+        type: 'success',
+        text: successMessage
+      };
+      
+      // Redirect to settings page
+      return res.redirect('/api-settings');
+    }
+  } catch (error) {
+    // Log the error
+    const logger = require('../utils/logger').forModule('settings');
+    logger.error('Error saving settings', null, error);
+    
+    try {
+      // Return appropriate error response based on request type
+      if (req.get('Content-Type') === 'application/json' || req.xhr) {
+        return res.status(500).json({
+          success: false,
+          error: error.message || 'An error occurred while saving settings.'
+        });
+      } else {
+        req.session.message = {
+          type: 'danger',
+          text: error.message || 'An error occurred while saving settings.'
+        };
+        return res.redirect('/api-settings');
+      }
+    } catch (responseError) {
+      // Last resort if we can't even send the error response
+      console.error('Critical error sending error response:', responseError);
+      res.status(500).end();
+    }
+  }
+});
+
+// Helper function to check Redis status
+async function checkRedisStatus() {
+  try {
+    await redisClient.ping();
+    return true;
+  } catch (error) {
+    console.error('Redis status check failed:', error);
+    return false;
+  }
+}
+
+// Helper function to check PostgreSQL status
+async function checkPostgresStatus() {
+  try {
+    // Use the health endpoint or direct DB connection to check status
+    // For now, we'll use a simple fetch to the health endpoint
+    const { Pool } = require('pg');
+    
+    // Get PostgreSQL connection details from Redis or environment variables
+    const host = await redisClient.get('settings:postgresql:host') || process.env.POSTGRES_HOST || 'localhost';
+    const port = await redisClient.get('settings:postgresql:port') || process.env.POSTGRES_PORT || '5432';
+    const database = await redisClient.get('settings:postgresql:database') || process.env.POSTGRES_DB || 'tmodel';
+    const user = await redisClient.get('settings:postgresql:user') || process.env.POSTGRES_USER || 'postgres';
+    const password = await redisClient.get('settings:postgresql:password') || process.env.POSTGRES_PASSWORD || '';
+    
+    const pool = new Pool({
+      host,
+      port,
+      database,
+      user,
+      password,
+      // Set a short timeout to avoid hanging if the database is down
+      connectionTimeoutMillis: 3000
+    });
+    
+    // Try to connect to the database
+    const client = await pool.connect();
+    await client.query('SELECT 1');
+    client.release();
+    await pool.end();
+    
+    return true;
+  } catch (error) {
+    console.error('PostgreSQL status check failed:', error);
+    return false;
+  }
+}
+
+// Helper function to retrieve the stored OpenAI API key
+async function getStoredOpenAIKey() {
+  try {
+    return await redisClient.get(OPENAI_API_KEY_REDIS_KEY);
+  } catch (error) {
+    console.error('Error retrieving OpenAI API key:', error);
+    return null;
+  }
+}
+
+// Helper function to store the OpenAI API key
+async function storeOpenAIKey(apiKey) {
+  try {
+    await redisClient.set(OPENAI_API_KEY_REDIS_KEY, apiKey);
+    return true;
+  } catch (error) {
+    console.error('Error storing OpenAI API key:', error);
+    throw error;
+  }
+}
+
+// Generic helper function to get a value from Redis
+async function getRedisValue(key) {
+  try {
+    return await redisClient.get(key);
+  } catch (error) {
+    console.error(`Error retrieving value for ${key}:`, error);
+    return null;
+  }
+}
+
+// Generic helper function to store a value in Redis
+async function storeRedisValue(key, value) {
+  try {
+    await redisClient.set(key, value);
+    return true;
+  } catch (error) {
+    console.error(`Error storing value for ${key}:`, error);
+    throw error;
+  }
+}
+
+// Helper function to mask an API key for display
+function maskApiKey(apiKey) {
+  if (!apiKey || apiKey.length < 8) return '';
+  
+  // Show only first 4 and last 4 characters
+  return `${apiKey.substring(0, 4)}${'*'.repeat(apiKey.length - 8)}${apiKey.substring(apiKey.length - 4)}`;
+}
+
+// Helper function to check if a string is non-empty
+function isNonEmptyString(str) {
+  return typeof str === 'string' && str.trim().length > 0;
+}
+
+/**
+ * GET /api-settings/openai-models
+ * Returns available OpenAI models for selection
+ */
+router.get('/openai-models', ensureAuthenticated, async (req, res) => {
+  try {
+    const models = await openaiUtil.fetchAvailableModels();
+    res.json({ success: true, models });
+  } catch (error) {
+    console.error('Error fetching OpenAI models:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Helper: Get preferred LLM provider, model, and API key (OpenAI)
+ * Returns { provider, model, apiKey } for use by other modules
+ */
+async function getPreferredLLMConfig() {
+  // Always check Redis for current provider
+  const provider = await redisClient.get(LLM_PROVIDER_REDIS_KEY) || 'openai';
+  if (provider === 'openai') {
+    const apiKey = await redisClient.get(OPENAI_API_KEY_REDIS_KEY);
+    const model = await redisClient.get(OPENAI_MODEL_REDIS_KEY) || 'gpt-3.5-turbo';
+    return { provider, apiKey, model };
+  } else if (provider === 'ollama') {
+    const model = await redisClient.get(OLLAMA_MODEL_REDIS_KEY) || 'llama3.3';
+    return { provider, apiKey: null, model };
+  } else {
+    return { provider: 'openai', apiKey: null, model: 'gpt-3.5-turbo' };
+  }
+}
+
+module.exports = router;
+module.exports.getPreferredLLMConfig = getPreferredLLMConfig;

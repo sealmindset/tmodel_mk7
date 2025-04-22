@@ -3,13 +3,45 @@
  */
 const express = require('express');
 const router = express.Router();
-
-// Import dependencies
-const redisUtil = require('../utils/redis');
+const redisClient = require('../utils/redis').client;
+const db = require('../db/db');
+const rapid7Service = require('../services/rapid7Service');
 const openaiUtil = require('../utils/openai');
 const ollamaUtil = require('../utils/ollama');
+const openApiParser = require('../utils/openApiParser');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 const scheduler = require('../utils/scheduler');
-const redisClient = redisUtil.client;
+
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: function (req, file, cb) {
+      const uploadDir = path.join(__dirname, '../uploads');
+      // Create uploads directory if it doesn't exist
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+      cb(null, 'rapid7-openapi-' + Date.now() + path.extname(file.originalname));
+    }
+  }),
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB max file size
+  },
+  fileFilter: function (req, file, cb) {
+    // Accept only JSON files
+    if (file.mimetype === 'application/json' || 
+        path.extname(file.originalname).toLowerCase() === '.json') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JSON files are allowed'));
+    }
+  }
+});
 
 // Get auth middleware - try both possible locations
 let ensureAuthenticated;
@@ -351,6 +383,242 @@ router.get('/postgres/status', async (req, res) => {
   } catch (error) {
     console.error('Error checking PostgreSQL status:', error);
     res.status(500).json({ error: 'Failed to check PostgreSQL status' });
+  }
+});
+
+/**
+ * @route POST /api/rapid7/parse-openapi
+ * @desc Parse Rapid7 OpenAPI JSON file
+ */
+router.post('/rapid7/parse-openapi', upload.single('openapi_file'), async (req, res) => {
+  try {
+    // Check if file was uploaded
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded. Please upload a valid OpenAPI JSON file.'
+      });
+    }
+
+    console.log('Processing uploaded OpenAPI file:', req.file.path);
+    
+    // Use the Rapid7 service to parse the OpenAPI file
+    const rapid7Service = require('../services/rapid7Service');
+    const rapid7Client = new rapid7Service();
+    const parseResult = await rapid7Client.parseOpenApiFile(req.file.path);
+    
+    // Return the parsed information
+    res.json(parseResult);
+  } catch (error) {
+    console.error('Error processing OpenAPI file:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing OpenAPI file: ' + error.message
+    });
+  }
+});
+
+/**
+ * @route POST /api/rapid7/parse-openapi-path
+ * @desc Parse Rapid7 OpenAPI JSON file from a specified path
+ */
+router.post('/rapid7/parse-openapi-path', async (req, res) => {
+  try {
+    const { filePath } = req.body;
+    
+    if (!filePath) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file path provided'
+      });
+    }
+    
+    console.log('Processing OpenAPI file from path:', filePath);
+    
+    // Use the Rapid7 service to parse the OpenAPI file
+    const rapid7Service = require('../services/rapid7Service');
+    const rapid7Client = new rapid7Service();
+    const parseResult = await rapid7Client.parseOpenApiFile(filePath);
+    
+    // Return the parsed information
+    res.json(parseResult);
+  } catch (error) {
+    console.error('Error processing OpenAPI file:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing OpenAPI file: ' + error.message
+    });
+  }
+});
+
+/**
+ * @route POST /api/rapid7/update-url
+ * @desc Update Rapid7 API URL based on OpenAPI specification
+ */
+router.post('/rapid7/update-url', async (req, res) => {
+  try {
+    const { baseUrl } = req.body;
+    
+    if (!baseUrl) {
+      return res.status(400).json({
+        success: false,
+        message: 'Base URL is required'
+      });
+    }
+    
+    console.log('Updating Rapid7 API URL:', baseUrl);
+    
+    // Use the Rapid7 service to update the API URL
+    const rapid7Service = require('../services/rapid7Service');
+    const rapid7Client = new rapid7Service();
+    const updateResult = await rapid7Client.updateApiUrlFromSpec(baseUrl);
+    
+    // Return the update result
+    res.json(updateResult);
+  } catch (error) {
+    console.error('Error updating Rapid7 API URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating Rapid7 API URL: ' + error.message
+    });
+  }
+});
+
+/**
+ * @route POST /api/rapid7/test-endpoint
+ * @desc Test a specific Rapid7 API endpoint
+ */
+router.post('/rapid7/test-endpoint', async (req, res) => {
+  try {
+    const { path, method } = req.body;
+    
+    if (!path || !method) {
+      return res.status(400).json({
+        success: false,
+        message: 'Path and method are required'
+      });
+    }
+    
+    console.log(`Testing Rapid7 endpoint: ${method} ${path}`);
+    
+    // Use the Rapid7 service to test the endpoint
+    const rapid7Service = require('../services/rapid7Service');
+    const rapid7Client = new rapid7Service();
+    const testResult = await rapid7Client.testEndpoint({ path, method });
+    
+    // Return the test result
+    res.json(testResult);
+  } catch (error) {
+    console.error('Error testing Rapid7 endpoint:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error testing Rapid7 endpoint: ' + error.message
+    });
+  }
+});
+
+/**
+ * @route GET /api/health/rapid7
+ * @desc Check Rapid7 API connection status
+ */
+router.get('/health/rapid7', async (req, res) => {
+  try {
+    // Get Rapid7 API URL and key from Redis
+    const rapid7ApiUrl = await redisClient.get('settings:rapid7:api_url') || process.env.RAPID7_API_URL || 'https://us.api.insight.rapid7.com';
+    const rapid7ApiKey = await redisClient.get('settings:rapid7:api_key') || process.env.RAPID7_API_KEY || '';
+    
+    console.log('Checking Rapid7 API health at:', rapid7ApiUrl);
+    console.log('API Key length:', rapid7ApiKey ? rapid7ApiKey.length : 0);
+    
+    // Validate URL and API key
+    if (!rapid7ApiUrl || typeof rapid7ApiUrl !== 'string') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid Rapid7 API URL format' 
+      });
+    }
+    
+    if (!rapid7ApiKey || typeof rapid7ApiKey !== 'string' || rapid7ApiKey.length < 10) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid Rapid7 API key format' 
+      });
+    }
+    
+    // Try to connect to the Rapid7 API
+    const axios = require('axios');
+    try {
+      // First try the /validate endpoint
+      const validationUrl = `${rapid7ApiUrl}/validate`;
+      console.log(`Checking Rapid7 connection using validation URL: ${validationUrl}`);
+      
+      const validationResponse = await axios.get(validationUrl, {
+        headers: {
+          'X-Api-Key': rapid7ApiKey
+        },
+        timeout: 5000 // 5 second timeout
+      });
+      
+      if (validationResponse.status === 200) {
+        console.log('Rapid7 API connection validated successfully');
+        return res.json({ 
+          success: true, 
+          message: 'Rapid7 API connection successful',
+          status: 'connected'
+        });
+      }
+    } catch (validationError) {
+      console.error('Validation endpoint failed:', validationError.message);
+      
+      // If validation endpoint fails, try a different endpoint
+      try {
+        // Try the /vm/v4/integration/vulnerabilities endpoint as fallback
+        const vulnUrl = `${rapid7ApiUrl}/vm/v4/integration/vulnerabilities`;
+        console.log(`Trying fallback URL: ${vulnUrl}`);
+        
+        const vulnResponse = await axios.get(vulnUrl, {
+          headers: {
+            'X-Api-Key': rapid7ApiKey
+          },
+          timeout: 5000 // 5 second timeout
+        });
+        
+        if (vulnResponse.status === 200) {
+          console.log('Rapid7 API connection successful via vulnerabilities endpoint');
+          return res.json({ 
+            success: true, 
+            message: 'Rapid7 API connection successful',
+            status: 'connected'
+          });
+        }
+      } catch (vulnError) {
+        console.error('Vulnerabilities endpoint failed:', vulnError.message);
+        
+        // Return detailed error information
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Failed to connect to Rapid7 API: ' + (vulnError.response ? 
+            `API responded with status ${vulnError.response.status}` : 
+            vulnError.message),
+          error: vulnError.message,
+          status: 'disconnected'
+        });
+      }
+    }
+    
+    // If we get here, both connection attempts failed
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Failed to connect to Rapid7 API after multiple attempts',
+      status: 'disconnected'
+    });
+  } catch (error) {
+    console.error('Error checking Rapid7 health:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error checking Rapid7 health: ' + error.message,
+      status: 'error'
+    });
   }
 });
 

@@ -70,14 +70,22 @@ client.on('error', (err) => {
   console.error('Redis error: ', err);
 });
 
-client
-  .connect()
-  .then(() => {
+// Centralized Redis connection at startup
+(async () => {
+  try {
+    await client.connect();
     console.log('Connected to Redis successfully!');
     // Initialize the threat analyzer
     app.locals.threatAnalyzer = new ThreatAnalyzer(client);
-  })
-  .catch(console.error);
+    // Initialize default settings
+    await initializeDefaultSettings();
+    console.log('Default settings initialized');
+  } catch (err) {
+    console.error('Failed to connect to Redis:', err);
+    // Don't exit process in development, but log the error
+    console.error('WARNING: Redis connection failed. Application may not function correctly.');
+  }
+})();
 
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 app.use(bodyParser.json({ limit: '10mb' }));
@@ -166,8 +174,16 @@ const apiRoutes = require('./routes/api/index');
 const settingsRoutes = require('./routes/settings');
 const projectDetailController = require('./routes/projectDetailController');
 const apiExplorerRoutes = require('./routes/api-explorer');
-const enterpriseArchitectureController = require('./routes/enterpriseArchitectureController');
+
+// Rapid7 Routes
+const rapid7BypassRoutes = require('./routes/rapid7-bypass');
+const rapid7TestRoutes = require('./routes/api/rapid7-test');
+
 const threatModelMergeRoutes = require('./routes/threatModelMerge');
+
+// Enterprise Architecture Routes
+const enterpriseArchitectureController = require('./routes/enterpriseArchitectureController');
+
 
 
 // Register routes with authentication
@@ -200,13 +216,21 @@ app.get('/threat-dashboard', (req, res) => {
 
 // Mount API routes
 app.use('/api', apiRoutes);
-app.use('/api-settings', settingsRoutes);
+app.use('/api/rapid7-test', rapid7TestRoutes);
+// Use new settings route with clean implementation
+app.use('/settings', require('./routes/settings-new'));
+
+// Keep old route as redirect for backward compatibility
+app.use('/api-settings', (req, res) => {
+  res.redirect('/settings');
+});
 app.use('/projects', require('./routes/projects'));
 app.use('/components', require('./routes/components'));
 app.use('/', projectDetailController);
 app.use('/', threatModelMergeRoutes);
 app.use('/vulnerability-dashboard', require('./routes/vulnerability-dashboard'));
 app.use('/api-explorer', apiExplorerRoutes);
+app.use('/rapid7-bypass', rapid7BypassRoutes);
 
 // Enterprise Architecture Routes
 app.use('/enterprise-architecture', enterpriseArchitectureController);

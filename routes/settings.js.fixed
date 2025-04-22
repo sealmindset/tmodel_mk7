@@ -1,0 +1,511 @@
+/**
+ * Settings Routes
+ */
+const express = require('express');
+const router = express.Router();
+const redisUtil = require('../utils/redis');
+const openaiUtil = require('../utils/openai');
+const ollamaUtil = require('../utils/ollama');
+const redisClient = redisUtil.client;
+
+// Import auth middleware
+let ensureAuthenticated;
+try {
+  ensureAuthenticated = require('../auth')(express()).ensureAuthenticated;
+} catch (error) {
+  console.log('Using direct middleware import for auth');
+  ensureAuthenticated = require('../middleware/auth').ensureAuthenticated;
+}
+
+// Constants for Redis keys
+const OPENAI_API_KEY_REDIS_KEY = 'settings:openai:api_key';
+const OPENAI_MODEL_REDIS_KEY = 'settings:api:openai:model'; // Updated to match app.js keys
+const LLM_PROVIDER_REDIS_KEY = 'settings:llm:provider';
+const OLLAMA_MODEL_REDIS_KEY = 'settings:api:ollama:model'; // Updated to match app.js keys
+
+// Debug all Redis keys on startup
+console.log('Settings.js - Redis key constants:');
+console.log('OPENAI_API_KEY_REDIS_KEY:', OPENAI_API_KEY_REDIS_KEY);
+console.log('OPENAI_MODEL_REDIS_KEY:', OPENAI_MODEL_REDIS_KEY);
+console.log('LLM_PROVIDER_REDIS_KEY:', LLM_PROVIDER_REDIS_KEY);
+console.log('OLLAMA_MODEL_REDIS_KEY:', OLLAMA_MODEL_REDIS_KEY);
+
+// Debug endpoint to see all settings in Redis
+router.get('/debug', ensureAuthenticated, async (req, res) => {
+  try {
+    // Get all the settings from Redis
+    const keys = [
+      LLM_PROVIDER_REDIS_KEY,
+      OPENAI_MODEL_REDIS_KEY,
+      OLLAMA_MODEL_REDIS_KEY,
+      OPENAI_API_KEY_REDIS_KEY
+    ];
+    
+    const values = {};
+    for (const key of keys) {
+      values[key] = await redisClient.get(key);
+    }
+    
+    // Also get keys using pattern matching
+    const allSettingsKeys = await redisClient.keys('settings:*');
+    const allSettings = {};
+    for (const key of allSettingsKeys) {
+      allSettings[key] = await redisClient.get(key);
+    }
+    
+    res.json({
+      specificKeys: values,
+      allSettings: allSettings,
+      processEnv: {
+        LLM_PROVIDER: process.env.LLM_PROVIDER,
+        OPENAI_MODEL: process.env.OPENAI_MODEL,
+        OLLAMA_MODEL: process.env.OLLAMA_MODEL
+      }
+    });
+  } catch (error) {
+    console.error('Redis debug error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Post route for saving settings
+router.post('/', ensureAuthenticated, async (req, res) => {
+  // Initialize variables
+  let connectionValid = false;
+  let successMessage = 'Settings saved successfully.';
+  const savedSettings = [];
+  const logger = require('../utils/logger').forModule('settings');
+  
+  try {
+    // Extract all form values
+    const {
+      llmProvider,
+      openaiApiKey,
+      openaiModel,
+      ollamaModel,
+      rapid7ApiUrl,
+      rapid7ApiKey,
+      settingsType,
+      postgresqlHost,
+      postgresqlPort,
+      postgresqlDatabase,
+      postgresqlUser,
+      postgresqlPassword,
+      redisHost,
+      redisPort,
+      redisPassword
+    } = req.body;
+
+    // Process LLM provider settings if provided
+    if (llmProvider) {
+      try {
+        console.log(`Saving LLM provider: ${llmProvider}`);
+        await redisClient.set(LLM_PROVIDER_REDIS_KEY, llmProvider);
+        savedSettings.push('LLM Provider');
+      } catch (error) {
+        console.error('Error saving LLM provider:', error);
+        throw new Error('Error saving LLM provider: ' + error.message);
+      }
+    }
+
+    // Process Rapid7 settings if provided
+    if (req.body.settingsType === 'rapid7') {
+      const logger = require('../utils/logger').forModule('settings');
+      logger.info('Processing Rapid7 settings');
+      
+      // Determine if this is an AJAX request
+      const isAjaxRequest = req.xhr || req.headers.accept?.indexOf('json') > -1 || req.get('Content-Type') === 'application/json';
+
+      try {
+        const rapid7ApiUrl = req.body.rapid7ApiUrl;
+        const rapid7ApiKey = req.body.rapid7ApiKey;
+
+        logger.debug('Processing Rapid7 settings', {
+          apiUrlProvided: !!rapid7ApiUrl,
+          apiKeyLength: rapid7ApiKey ? rapid7ApiKey.length : 0
+        });
+
+        // Validate Rapid7 API URL format
+        if (!isNonEmptyString(rapid7ApiUrl)) {
+          logger.warn('Rapid7 API URL is empty or invalid');
+          req.flash('warning', 'Rapid7 API URL is empty. Using default URL.');
+          // Use a default URL
+          rapid7ApiUrl = 'https://us.api.insight.rapid7.com';
+          logger.info('Using default Rapid7 API URL', { url: rapid7ApiUrl });
+        }
+
+        // Format the URL properly
+        let formattedUrl = rapid7ApiUrl.trim();
+
+        // Add https:// if missing
+        if (!formattedUrl.startsWith('http://') && !formattedUrl.startsWith('https://')) {
+          formattedUrl = 'https://' + formattedUrl;
+          logger.debug('Added https:// to URL', { url: formattedUrl });
+        }
+
+        // Remove trailing slash if present
+        if (formattedUrl.endsWith('/')) {
+          formattedUrl = formattedUrl.slice(0, -1);
+          logger.debug('Removed trailing slash from URL', { url: formattedUrl });
+        }
+
+        // Validate URL format
+        try {
+          new URL(formattedUrl);
+          logger.debug('Valid URL format', { url: formattedUrl });
+        } catch (urlError) {
+          logger.error('Invalid URL format', { url: formattedUrl }, urlError);
+          req.flash('error', 'Invalid URL format: ' + urlError.message);
+          throw new Error('Invalid URL format: ' + urlError.message);
+        }
+
+        logger.info('Saving Rapid7 API URL to Redis', { url: formattedUrl });
+        try {
+          // Use redisUtil.storeRedisValue instead of direct client access
+          await redisUtil.storeRedisValue('settings:rapid7:api_url', formattedUrl);
+          logger.info('Successfully saved Rapid7 API URL to Redis');
+          savedSettings.push('Rapid7 API URL');
+        } catch (redisError) {
+          logger.error('Redis error saving Rapid7 API URL', null, redisError);
+          throw new Error('Database error saving Rapid7 API URL: ' + redisError.message);
+        }
+
+        // Save Rapid7 API key with proper validation
+        if (!isNonEmptyString(rapid7ApiKey)) {
+          logger.warn('Rapid7 API key is empty or invalid');
+          // Don't save an empty API key
+          req.flash('warning', 'Rapid7 API key is empty. Please provide a valid API key.');
+        } else {
+          // Ensure we're working with a string
+          const apiKeyString = String(rapid7ApiKey).trim();
+          
+          // Log key details for debugging (without exposing the full key)
+          const keyStart = apiKeyString.substring(0, 4);
+          const keyEnd = apiKeyString.length > 8 ? apiKeyString.substring(apiKeyString.length - 4) : '****';
+          logger.debug('Processing Rapid7 API key', { 
+            keyPrefix: keyStart,
+            keySuffix: keyEnd,
+            keyLength: apiKeyString.length 
+          });
+          
+          // Only check if it's too short
+          if (apiKeyString.length < 8) {
+            logger.warn('Rapid7 API key is shorter than recommended');
+            req.flash('warning', 'Rapid7 API key is shorter than recommended but will be saved.');
+          }
+          
+          logger.info('Saving Rapid7 API key to Redis');
+          try {
+            // Use redisUtil.storeRedisValue instead of direct client access
+            await redisUtil.storeRedisValue('settings:rapid7:api_key', apiKeyString);
+            logger.info('Successfully saved Rapid7 API key to Redis');
+            savedSettings.push('Rapid7 API Key');
+            req.flash('success', 'Rapid7 API key saved successfully.');
+          } catch (redisError) {
+            logger.error('Redis error saving Rapid7 API key', null, redisError);
+            req.flash('error', 'Could not save Rapid7 API key: ' + redisError.message);
+            throw new Error('Database error saving Rapid7 API key: ' + redisError.message);
+          }
+        }
+      } catch (error) {
+        logger.error('Error saving Rapid7 settings', null, error);
+        
+        // If this was an AJAX request, return JSON
+        if (req.xhr || req.headers.accept.indexOf('json') > -1) {
+          return res.status(500).json({
+            success: false,
+            message: 'Error saving Rapid7 settings: ' + error.message
+          });
+        }
+        
+        // Otherwise redirect back to the settings page with flash message
+        req.flash('error', 'Error saving Rapid7 settings: ' + error.message);
+        return res.redirect('/api-settings#rapid7-tab');
+      }
+
+      // For Rapid7 settings, return JSON response if it's an AJAX request
+      if (req.body.settingsType === 'rapid7') {
+        try {
+          if (isAjaxRequest) {
+            return res.json({
+              success: true,
+              message: successMessage,
+              savedSettings: savedSettings
+            });
+          } else {
+            req.flash('success', successMessage);
+            return res.redirect('/api-settings#rapid7-tab');
+          }
+        } catch (responseError) {
+          logger.error('Error handling Rapid7 settings response', null, responseError);
+          if (isAjaxRequest) {
+            return res.status(500).json({
+              success: false,
+              message: 'Error handling Rapid7 settings: ' + responseError.message
+            });
+          } else {
+            req.flash('error', 'Error handling Rapid7 settings: ' + responseError.message);
+            return res.redirect('/api-settings#rapid7-tab');
+          }
+        }
+      }
+    }
+    
+    // Process OpenAI API key if provided
+    if (openaiApiKey) {
+      try {
+        await storeOpenAIKey(openaiApiKey);
+        savedSettings.push('OpenAI API Key');
+      } catch (err) {
+        logger.error('Error saving OpenAI API key', null, err);
+        throw new Error('Error saving OpenAI API key: ' + err.message);
+      }
+    }
+    
+    // Process OpenAI model if provided
+    if (openaiModel) {
+      try {
+        // Use the new key format
+        await redisClient.set(OPENAI_MODEL_REDIS_KEY, openaiModel);
+        savedSettings.push('OpenAI Model');
+      } catch (err) {
+        logger.error('Error saving OpenAI Model', null, err);
+        throw new Error('Error saving OpenAI Model: ' + err.message);
+      }
+    }
+    
+    // Process Ollama model if provided
+    if (ollamaModel) {
+      try {
+        await redisClient.set(OLLAMA_MODEL_REDIS_KEY, ollamaModel);
+        savedSettings.push('Ollama Model');
+      } catch (err) {
+        logger.error('Error saving Ollama Model', null, err);
+        throw new Error('Error saving Ollama Model: ' + err.message);
+      }
+    }
+    
+    // Process PostgreSQL settings if provided
+    if (postgresqlHost) {
+      try {
+        await redisClient.set('settings:postgresql:host', postgresqlHost);
+        savedSettings.push('PostgreSQL Host');
+        
+        if (postgresqlPort) {
+          await redisClient.set('settings:postgresql:port', postgresqlPort);
+          savedSettings.push('PostgreSQL Port');
+        }
+        
+        if (postgresqlDatabase) {
+          await redisClient.set('settings:postgresql:database', postgresqlDatabase);
+          savedSettings.push('PostgreSQL Database');
+        }
+        
+        if (postgresqlUser) {
+          await redisClient.set('settings:postgresql:user', postgresqlUser);
+          savedSettings.push('PostgreSQL User');
+        }
+        
+        if (postgresqlPassword) {
+          await redisClient.set('settings:postgresql:password', postgresqlPassword);
+          savedSettings.push('PostgreSQL Password');
+        }
+      } catch (err) {
+        logger.error('Error saving PostgreSQL settings', null, err);
+        throw new Error('Error saving PostgreSQL settings: ' + err.message);
+      }
+    }
+    
+    // Process Redis settings if provided
+    if (redisHost) {
+      try {
+        await redisClient.set('settings:redis:host', redisHost);
+        savedSettings.push('Redis Host');
+        
+        if (redisPort) {
+          await redisClient.set('settings:redis:port', redisPort);
+          savedSettings.push('Redis Port');
+        }
+        
+        if (redisPassword) {
+          await redisClient.set('settings:redis:password', redisPassword);
+          savedSettings.push('Redis Password');
+        }
+      } catch (err) {
+        logger.error('Error saving Redis settings', null, err);
+        throw new Error('Error saving Redis settings: ' + err.message);
+      }
+    }
+    
+    // Return appropriate response based on request type
+    try {
+      if (req.get('Content-Type') === 'application/json' || req.xhr) {
+        return res.json({
+          success: true,
+          message: successMessage,
+          connectionValid: connectionValid || false,
+          savedSettings: savedSettings
+        });
+      } else {
+        // Set success message in session for web requests
+        req.session.message = {
+          type: 'success',
+          text: successMessage
+        };
+        
+        // Redirect to settings page
+        return res.redirect('/settings');
+      }
+    } catch (responseError) {
+      logger.error('Error sending response', null, responseError);
+      // If we can't send the success response, try to send an error response
+      try {
+        if (req.get('Content-Type') === 'application/json' || req.xhr) {
+          return res.status(500).json({
+            success: false,
+            error: 'Error sending response: ' + responseError.message
+          });
+        } else {
+          req.flash('error', 'Error: ' + responseError.message);
+          return res.redirect('/settings');
+        }
+      } catch (finalError) {
+        // Last resort if we can't even send the error response
+        console.error('Critical error sending response:', finalError);
+        res.status(500).end();
+      }
+    }
+  } catch (error) {
+    // Log the error
+    logger.error('Error saving settings', null, error);
+    
+    try {
+      // Return appropriate error response based on request type
+      if (req.get('Content-Type') === 'application/json' || req.xhr) {
+        return res.status(500).json({
+          success: false,
+          error: error.message || 'An error occurred while saving settings.'
+        });
+      } else {
+        req.session.message = {
+          type: 'danger',
+          text: error.message || 'An error occurred while saving settings.'
+        };
+        return res.redirect('/settings');
+      }
+    } catch (responseError) {
+      // Last resort if we can't even send the error response
+      console.error('Critical error sending error response:', responseError);
+      res.status(500).end();
+    }
+  }
+});
+
+// Helper function to check Redis status
+async function checkRedisStatus() {
+  try {
+    await redisClient.ping();
+    return true;
+  } catch (error) {
+    console.error('Redis status check failed:', error);
+    return false;
+  }
+}
+
+// Helper function to check PostgreSQL status
+async function checkPostgresStatus() {
+  try {
+    // For now, we'll use a simple fetch to the health endpoint
+    const { Pool } = require('pg');
+    
+    // Get PostgreSQL connection details from Redis or environment variables
+    const host = await redisClient.get('settings:postgresql:host') || process.env.POSTGRES_HOST || 'localhost';
+    const port = await redisClient.get('settings:postgresql:port') || process.env.POSTGRES_PORT || '5432';
+    const database = await redisClient.get('settings:postgresql:database') || process.env.POSTGRES_DB || 'tmodel';
+    const user = await redisClient.get('settings:postgresql:user') || process.env.POSTGRES_USER || 'postgres';
+    const password = await redisClient.get('settings:postgresql:password') || process.env.POSTGRES_PASSWORD || '';
+    
+    const pool = new Pool({
+      host,
+      port,
+      database,
+      user,
+      password,
+      // Set a short timeout to avoid hanging if the database is down
+      connectionTimeoutMillis: 3000
+    });
+    
+    // Try to connect to the database
+    const client = await pool.connect();
+    await client.query('SELECT 1');
+    client.release();
+    await pool.end();
+    
+    return true;
+  } catch (error) {
+    console.error('PostgreSQL status check failed:', error);
+    return false;
+  }
+}
+
+// Helper function to retrieve the stored OpenAI API key
+async function getStoredOpenAIKey() {
+  try {
+    return await redisClient.get(OPENAI_API_KEY_REDIS_KEY);
+  } catch (error) {
+    console.error('Error retrieving OpenAI API key:', error);
+    return null;
+  }
+}
+
+// Helper function to store the OpenAI API key
+async function storeOpenAIKey(apiKey) {
+  try {
+    await redisClient.set(OPENAI_API_KEY_REDIS_KEY, apiKey);
+    return true;
+  } catch (error) {
+    console.error('Error storing OpenAI API key:', error);
+    throw error;
+  }
+}
+
+// Helper function to check if a string is non-empty
+function isNonEmptyString(str) {
+  return typeof str === 'string' && str.trim().length > 0;
+}
+
+/**
+ * GET /api-settings/openai-models
+ * Returns available OpenAI models for selection
+ */
+router.get('/openai-models', ensureAuthenticated, async (req, res) => {
+  try {
+    const models = await openaiUtil.fetchAvailableModels();
+    res.json({ success: true, models });
+  } catch (error) {
+    console.error('Error fetching OpenAI models:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Helper: Get preferred LLM provider, model, and API key (OpenAI)
+ * Returns { provider, model, apiKey } for use by other modules
+ */
+async function getPreferredLLMConfig() {
+  // Always check Redis for current provider
+  const provider = await redisClient.get(LLM_PROVIDER_REDIS_KEY) || 'openai';
+  if (provider === 'openai') {
+    const apiKey = await redisClient.get(OPENAI_API_KEY_REDIS_KEY);
+    const model = await redisClient.get(OPENAI_MODEL_REDIS_KEY) || 'gpt-3.5-turbo';
+    return { provider, apiKey, model };
+  } else if (provider === 'ollama') {
+    const model = await redisClient.get(OLLAMA_MODEL_REDIS_KEY) || 'llama3.3';
+    return { provider, apiKey: null, model };
+  } else {
+    return { provider: 'openai', apiKey: null, model: 'gpt-3.5-turbo' };
+  }
+}
+
+module.exports = router;
+module.exports.getPreferredLLMConfig = getPreferredLLMConfig;
