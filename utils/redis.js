@@ -126,9 +126,9 @@ const initializeDefaultSettings = async () => {
   try {
     // Define default settings keys
     const defaultSettings = {
-      'settings:llm:provider': 'openai',
-      'settings:api:openai:model': 'gpt-3.5-turbo',
-      'settings:api:ollama:model': 'llama3.3'
+      'settings:llm:provider': 'ollama',
+      'settings:openai:api_model': 'gpt-3.5-turbo',
+      'settings:ollama:model': 'llama3.3:latest'
     };
     
     getLogger().info('Initializing default LLM settings...');

@@ -569,7 +569,19 @@ async function handleLlmProviderSettings(req, savedSettings) {
   // Store in PostgreSQL for persistence
   await storeSettingInPostgres('llm_provider', llmProvider);
   
+  // Reload relevant services based on the selected provider
+  if (llmProvider === 'openai') {
+    // Ensure OpenAI is properly initialized
+    await openaiUtil.reloadClient();
+    logger.info('OpenAI client reloaded with current settings');
+  } else if (llmProvider === 'ollama') {
+    // Ensure Ollama is properly initialized
+    await ollamaUtil.reloadClient();
+    logger.info('Ollama client reloaded with current settings');
+  }
+  
   savedSettings.push('LLM Provider');
+  logger.info(`LLM Provider set to: ${llmProvider}`);
 }
 
 async function handleOpenaiSettings(req, savedSettings) {

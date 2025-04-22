@@ -2600,9 +2600,33 @@ app.get('/test-analyzer', ensureAuthenticated, async (req, res) => {
     // Initialize default settings if they don't exist
     await initializeDefaultSettings();
     
-    // Log current LLM provider to verify settings
-    const currentProvider = await getRedisValue('settings:llm:provider', 'openai');
+    // Get and apply current LLM provider settings
+    const currentProvider = await getRedisValue('settings:llm:provider', 'ollama');
     console.log(`Current LLM provider: ${currentProvider}`);
+    
+    // Also update the environment variable to ensure consistency
+    process.env.LLM_PROVIDER = currentProvider;
+    
+    // Load provider-specific settings
+    if (currentProvider === 'ollama') {
+      // Initialize Ollama client with current settings
+      const ollamaUtil = require('./utils/ollama');
+      await ollamaUtil.reloadClient();
+      
+      // Get current Ollama model setting
+      const ollamaModel = await getRedisValue('settings:ollama:model', 'llama3.3:latest');
+      process.env.OLLAMA_MODEL = ollamaModel;
+      console.log(`Using Ollama model: ${ollamaModel}`);
+    } else if (currentProvider === 'openai') {
+      // Initialize OpenAI client with current settings
+      const openaiUtil = require('./utils/openai');
+      await openaiUtil.refreshClient();
+      
+      // Get current OpenAI model setting
+      const openaiModel = await getRedisValue('settings:openai:api_model', 'gpt-4');
+      process.env.OPENAI_MODEL = openaiModel;
+      console.log(`Using OpenAI model: ${openaiModel}`);
+    }
     
     // Start the server after Redis is ready
     app.listen(port, () => {

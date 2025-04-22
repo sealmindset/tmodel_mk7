@@ -47,6 +47,30 @@ const defaultValues = {
   }
 };
 
+// Questions for LLM Provider settings
+const llmProviderQuestions = [
+  {
+    name: 'LLM_PROVIDER',
+    message: 'Which LLM provider would you like to use? (openai/ollama):',
+    default: 'ollama'
+  },
+  {
+    name: 'OPENAI_API_KEY',
+    message: 'Enter your OpenAI API Key (required if using OpenAI):',
+    default: ''
+  },
+  {
+    name: 'OPENAI_MODEL',
+    message: 'Enter the OpenAI model to use:',
+    default: 'gpt-4'
+  },
+  {
+    name: 'OLLAMA_MODEL',
+    message: 'Enter the Ollama model to use:',
+    default: 'llama3.3:latest'
+  }
+];
+
 // Questions for Rapid7 integration
 const rapid7Questions = [
   {
@@ -97,6 +121,19 @@ async function askQuestions() {
     envVars[key] = value;
   }
   
+  // Ask for LLM Provider settings
+  console.log('\nLLM Provider Configuration:');
+  for (const question of llmProviderQuestions) {
+    const value = await new Promise(resolve => {
+      rl.question(`${question.name} [${question.default}]: `, answer => {
+        resolve(answer || question.default);
+      });
+    });
+    
+    // Always include LLM provider settings
+    envVars[question.name] = value;
+  }
+
   // Ask for Rapid7 integration details
   console.log('\nRapid7 Integration (Optional):');
   for (const question of rapid7Questions) {

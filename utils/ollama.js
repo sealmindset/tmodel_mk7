@@ -3,9 +3,17 @@
  * Provides methods for interacting with the local Ollama API
  */
 const axios = require('axios');
+const redisUtil = require('./redis');
+
+// Redis key constants
+const OLLAMA_API_URL_REDIS_KEY = 'settings:ollama:api_url';
+const OLLAMA_MODEL_REDIS_KEY = 'settings:ollama:model';
 
 // Default Ollama endpoint
-const OLLAMA_API_URL = process.env.OLLAMA_API_URL || 'http://localhost:11434/api';
+let OLLAMA_API_URL = process.env.OLLAMA_API_URL || 'http://localhost:11434/api';
+
+// Default Ollama model
+let DEFAULT_MODEL = process.env.OLLAMA_MODEL || 'llama3.3:latest';
 
 // Flag to ensure we only log the API status message once per server startup
 let apiStatusMessageLogged = false;
@@ -104,7 +112,7 @@ const getApiEvents = () => apiEvents;
  * @param {number} maxTokens - Maximum number of tokens to generate
  * @returns {Promise<Object>} - The API response
  */
-const getCompletion = async (prompt, model = 'llama3.3', maxTokens = 100) => {
+const getCompletion = async (prompt, model = DEFAULT_MODEL, maxTokens = 100) => {
   try {
     // Prepare request parameters
     const requestParams = {
@@ -169,7 +177,7 @@ const getCompletion = async (prompt, model = 'llama3.3', maxTokens = 100) => {
  * @param {number} maxTokens - Maximum number of tokens to generate
  * @returns {Promise<Object>} - The API response formatted like OpenAI's
  */
-const getChatCompletion = async (messages, model = 'llama3.3', maxTokens = 100) => {
+const getChatCompletion = async (messages, model = DEFAULT_MODEL, maxTokens = 100) => {
   try {
     // Convert messages array to a prompt format that Ollama can understand
     const conversationText = messages.map(msg => {
@@ -314,6 +322,39 @@ const testConnection = async (apiUrl) => {
   }
 };
 
+/**
+ * Reload the Ollama client with current settings from Redis
+ * @returns {Promise<boolean>} - true if successful, false otherwise
+ */
+const reloadClient = async () => {
+  try {
+    // Get API URL from Redis
+    const redisClient = redisUtil.client;
+    const storedApiUrl = await redisClient.get(OLLAMA_API_URL_REDIS_KEY);
+    if (storedApiUrl) {
+      OLLAMA_API_URL = storedApiUrl.endsWith('/api') ? storedApiUrl : `${storedApiUrl}/api`;
+      console.log(`Reloaded Ollama API URL from Redis: ${OLLAMA_API_URL}`);
+    }
+    
+    // Get default model from Redis
+    const storedModel = await redisClient.get(OLLAMA_MODEL_REDIS_KEY);
+    if (storedModel) {
+      DEFAULT_MODEL = storedModel;
+      console.log(`Reloaded Ollama default model from Redis: ${DEFAULT_MODEL}`);
+    }
+    
+    // Reset the logged status message flag so we get fresh status messages
+    apiStatusMessageLogged = false;
+    
+    // Test connection with new settings
+    const isConnected = await checkStatus();
+    return isConnected;
+  } catch (error) {
+    console.error('Error reloading Ollama client:', error.message);
+    return false;
+  }
+};
+
 module.exports = {
   checkStatus,
   getCompletion,
@@ -321,5 +362,6 @@ module.exports = {
   getModels,
   getApiEvents,
   logApiEvent,
-  testConnection
+  testConnection,
+  reloadClient
 };
